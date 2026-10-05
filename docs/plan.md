@@ -78,54 +78,92 @@ Throwaway code in `spike/`, not part of the package (§17.2). Each script is a P
 
 ### 2.1 Data
 
-- **Supernatural S2** (PGS): 22 episodes. The 8 `…a.mkv` duplicates are left out.
-- **The Incredible Hulk S2** (22 episodes) as the VobSub season. Its track type is checked at probe time, and S3 (23 episodes) is the fallback if S2 isn't VobSub.
-- Labels come from the file names (`show_sXXeYY.mkv`, aired order for both shows). There are **no extras**, so coverage will look better than it will on raw rips. That's a known limit of M0, not something to fix there.
+Four labeled seasons from four shows, two with PGS subtitles and two with VobSub:
+
+| Season | Files | Track type |
+|---|---|---|
+| Supernatural S2 | 22 (the 8 `…a.mkv` duplicates are left out) | PGS, known |
+| The Incredible Hulk S2 | 22 | VobSub, expected; S3 (23 files) is the fallback |
+| The West Wing S1 | 22 | Unknown |
+| A fourth, picked after probing to make two of each | about 22 | Candidates: Babylon 5 S1, The Invisible Man S1, Supernatural S1. A show not already in the set is preferred |
+
+- **Step 0: probe the candidates' headers** (seconds per season). This lists their subtitle tracks, including any closed-caption text track MakeMKV extracted from a DVD.
+- **Why four seasons.** With two seasons, track type and show would be the same variable: PGS on a show with good TMDB data, VobSub on a 1978 show. A weak result then couldn't be traced to OCR or to data. Four seasons also mean each leave-one-season-out fit uses three seasons.
+- **Labels** come from the file names, in aired order for all four seasons.
+- **Firefly is left out.** It has only 14 files, labeled in its "Intended Order", which would need the episode-group mapping from M1.
+- **There are no extras**, so coverage will look better than it will on raw rips. That's a known limit of M0, not something to fix there.
+- **OCR is iterated on about 3 files per season.** The full run happens once OCR is stable, because every OCR fix means extracting again.
 
 ### 2.2 Stage contracts (written by the orchestrator first)
 
 | Stage | Output |
 |---|---|
-| `extract.py` | `out/dialogue/<show>-s<NN>/<basename>.json`: path, size, duration, chosen track (codec, language, events), windows (start, end, lines with time and text), OCR quality |
+| `extract.py` | `out/dialogue/<show>-s<NN>/<basename>.json`: path, size, duration, chosen track (codec, language, events), windows (start, end, lines with time and text), OCR quality, and the lines of a closed-caption text track if there is one. `--probe-only` lists each file's tracks |
 | `tmdb.py` | `out/tmdb/<show>-s<NN>.json`: episodes (id, S/E, title, overview, guest stars with character, writers/directors) and the series cast (for removing names) |
 | `labels.py` | `out/labels.csv`: path, show, season, label |
-| `score.py` | `out/results/<show>-s<NN>.json` and a printed summary |
+| `score.py` | `out/results/<show>-s<NN>.json`, `out/results/pooled.json` and a printed summary |
 
 ### 2.3 Work packages
 
 | # | Package | Runs as | Wave | Notes |
 |---|---|---|---|---|
 | 0.0 | README (how to run on eweb), stage contracts, `.gitignore` for `spike/out/` | Orchestrator | 1 | |
-| 0.1 | `extract.py`: probe, track selection (§8.2), PGS/VobSub decode via PyAV (`BitmapSubtitle` planes + palette), preprocessing, Tesseract, sampled windows at 20/50/80% (≥ 60 lines or 5 min), normalization (§8.3), OCR quality | **Opus** | 2 | The riskiest technical piece, and it can only be debugged against real media. The same agent is kept for the fixes the real runs show up |
-| 0.2 | `tmdb.py` + `labels.py` | Haiku | 2 | Small and mechanical, so batched into one agent |
-| 0.3 | `score.py`: synopsis BM25 with all cast/character names removed, robust z, chance-max threshold, 0.8/σ, clamp +4; guest names IDF-weighted, dictionary words filtered, clamp +6; prior with π_x = 0.15; F × (E+F) basic assignment; Δ by re-solve; metrics | Sonnet | 2 | Tested on a synthetic matrix with a known answer. The orchestrator checks the math against §9–§11 |
-| 0.4 | Run on the library: extract both seasons, fetch, score; fix OCR issues | Orchestrator + 0.1's agent | 3 | Needs tesseract and uv installed on eweb |
-| 0.5 | *Optional:* `llm.py` on misses and low-Δ files: full-season candidates, structured output, quote check, cost from usage data | Sonnet (loads the `claude-api` skill) | 4 | Only built after wave 3 shows where it's needed |
+| 0.1 | `extract.py`: `--probe-only`, track selection (§8.2), PGS/VobSub decode via PyAV (`BitmapSubtitle` planes + palette), preprocessing, Tesseract, sampled windows at 20/50/80% (≥ 60 lines or 5 min), closed-caption text tracks, normalization (§8.3), OCR quality | **Opus** | 2 | The riskiest technical piece, and it can only be debugged against real media. The same agent is kept for the fixes the real runs show up |
+| 0.2 | `tmdb.py` + `labels.py` for the candidate seasons | Haiku | 2 | Small and mechanical, so batched into one agent |
+| 0.3 | `score.py`: synopsis BM25 with all cast/character names removed, robust z, chance-max threshold, 0.8/σ, clamp +4; guest names IDF-weighted, dictionary words filtered, clamp +6; prior with π_x = 0.15; F × (E+F) basic assignment; Δ by re-solve; conditional-logit fit of the two weights, leave-one-season-out and in-sample; captions scored alongside OCR where they exist; metrics pooled and per season | Sonnet | 2 | Tested on a synthetic matrix with a known answer. The orchestrator checks the math against §9–§11 and §16.3 |
+| 0.4 | Run on the library: probe the candidates and pick the fourth season; iterate OCR on about 3 files per season; full run of all four; fetch; score | Orchestrator + 0.1's agent | 3 | Needs tesseract and uv installed on eweb |
+| 0.5 | `llm.py`, only if outcome 1 (§2.5) isn't reached: the files below high, full-season candidates, structured output, quote check, raw (unclamped) log-odds, cost from usage data | Sonnet (loads the `claude-api` skill) | 4 | Built after wave 3. **Runs only with your OK and a cost estimate; ceiling $1 per season** |
 | 0.6 | `spike/RESULTS.md`: tables from the results JSON (Haiku), analysis and recommendation (orchestrator) | Haiku + orchestrator | 5 | |
 
 ### 2.4 What gets measured
 
-The metrics the spec requires: top-1 accuracy, the Δ distribution, coverage at Δ ≥ 4.6, errors at high, OCR quality per track type, and (if 0.5 runs) what the LLM rescues and what it costs.
+**The deciding number is coverage at Δ ≥ 4.6 with weights fitted on the other seasons** (leave-one-season-out, §16.3), pooled across the four seasons and per season.
 
-Plus **diagnostics that don't depend on the weights**, because the default LLR mappings are placeholders until `eval --fit` exists (§9.1):
+- **Coverage under the default weights** is reported alongside. The defaults are placeholders (§9.1), so it can't decide anything.
+- **Coverage with in-sample weights** is reported as an optimistic bound. If it's far above the cross-fitted figure, the weights don't carry over between shows, which is a finding in itself.
+
+The spec's other metrics: top-1 accuracy, the Δ distribution, and errors at high.
+
+**Diagnostics that don't depend on the weights:**
 
 - the true episode's rank under each scorer on its own (rank-1 rate, MRR);
 - the gap between the true episode's score and the best other score.
 
-These separate "the signal is weak" from "the default weights are wrong", which the Δ coverage figure alone can't do.
+**OCR:**
+
+- OCR quality for PGS vs. VobSub;
+- samples of the raw OCR text, to read;
+- where a closed-caption text track exists, the captions' scores vs. the OCR'd VobSub's for the same files. This shows directly what OCR costs.
+
+**The LLM (if 0.5 runs):** what it rescues, its cost, and its raw log-odds.
+
+- **With the spec's defaults, LLM evidence can't reach high.** The defaults are a ±3 clamp and weight 1. With E = 22, an episode needs about 1.4 nats to beat "extra" (§11.2), plus 4.6 for high: about 6 nats. The spike has no other scorer in the LLM regime, so it can reach at most 3.
+- The spike therefore lifts the clamp and fits the LLM's weight leave-one-season-out on the files below high, like the base weights.
 
 ### 2.5 Decision (with you, before any Beads epic exists)
 
-**Proposed rules, for you to set before the run so the result isn't argued after the fact:**
+These rules were set on 2026-10-04, before the run. They're also in the spec's M0 row (§17.2).
 
-| Offline result (synopsis + guests), on both seasons | Reading | Likely change |
+**Checks first:**
+
+1. **Any error at high**, with default or fitted weights: find the cause before deciding (evidence counted twice, or a clamp that's too loose).
+2. **VobSub is clearly worse than PGS**, with garbled samples, or captions scoring far better than OCR: OCR is the bottleneck. Fix it and rerun before reading the VobSub seasons.
+3. **A season well below the others** (under about 75% coverage): find its cause (OCR, thin data, or a real weakness) before deciding.
+
+**Outcome, by pooled coverage at high with cross-fitted weights:**
+
+| Outcome | Condition | Change |
 |---|---|---|
-| Coverage at Δ ≥ 4.6 ≳ 70% and no errors at high | The plan stands | None; LLM stays optional (`auto`) |
-| Top-1 ≳ 85% but coverage low | The signal is there, but confidence is weak | Default LLM mode `auto`; check weights early in M3 |
-| Top-1 ≲ 60% on either season, with OCR quality ≳ 0.85 | The offline path is weak | Revisit the offline goal (§1.2); the LLM becomes the main path; consider moving OpenSubtitles before M7 |
-| VobSub OCR quality ≲ 0.8 | The problem is OCR, not scoring | Fix OCR before reading the scores (M2 risk, §18) |
+| 1. Offline is enough | ≥ 90%, no errors at high | None |
+| 2. Offline + LLM | Below 90%; the LLM on the files below high brings it to ≥ 90% at ≤ $1 per season | The LLM becomes the recommended setup (README, quality report). Its default mode stays `off`. §1.2 is reworded: offline works, with more review |
+| 3. Signal too weak | Below 90% even with the LLM, or only above $1 per season | Move reference subtitles (OpenSubtitles) ahead of the M3 gate; test cues; revisit §1.2 |
 
-Then: spec revision if needed (orchestrator drafts it, you review it). Then Beads: install `bd` (asked first); check for `.beads/` with embedded Dolt in git; `bd init`; create epics M1–M7 and the M3 gate task with blocks dependencies; turn §3's packages into tasks; delete §3 from this file.
+**Then:**
+
+1. Spec revision if needed: the orchestrator drafts it and you review it.
+2. Beads: install `bd` (asked first); check for `.beads/` with embedded Dolt in git; `bd init`.
+3. Create epics M1–M7 and the M3 gate task, with blocks dependencies.
+4. Turn §3's packages into tasks and delete §3 from this file.
 
 ---
 
