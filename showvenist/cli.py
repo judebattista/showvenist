@@ -131,7 +131,13 @@ def inspect_cmd(
         b = load_bundle(show, root)
         language = b.show.language
         for e in b.episodes:
-            vocab.update(normalize(" ".join([e.title, *(s.text for s in e.synopses)])).split())
+            names = [*e.directors, *e.writers]
+            for c in e.guest_cast:
+                names += [c.actor, c.character]
+            vocab.update(
+                normalize(" ".join([e.title, *e.alt_titles, *(s.text for s in e.synopses), *names]))
+                .split()
+            )
     cache_dir().mkdir(parents=True, exist_ok=True)
     cache = AnalysisCache(cache_dir() / "analysis.db")
     typer.echo(inspect_file(file, language, vocab, load_config().analysis, cache))

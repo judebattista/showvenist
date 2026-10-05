@@ -11,12 +11,13 @@ pad); Tesseract reads the images in a thread pool.
 Threads, not processes: pytesseract runs each image in its own ``tesseract`` subprocess, so a
 thread pool already uses every core without pickling images across processes.
 
-Dictionary for ``ocr_quality``: the spike used ``wordfreq``. Here the word list comes from
-Tesseract's own traineddata for the OCR language (its LSTM word DAWG, unpacked with
-``combine_tessdata`` and ``dawg2wordlist``, both shipped in the ``tesseract-ocr`` package that
-OCR already requires): no extra Python dependency and no system word list. English yields about
-340k words. It is unpacked once per process into a temporary directory and held in memory. If
-the tools or the traineddata are missing, quality falls back to the show vocabulary alone.
+Word check for ``ocr_quality`` (``is_word``): ``wordfreq`` Zipf frequency >= WORD_ZIPF_FLOOR,
+with apostrophes restored for contractions (our normalization drops them: "theyre" is checked as
+"they're") and a whitelist for one- and two-letter words, because web frequencies rate OCR junk
+such as "rn", "ii" and "lt" as common. Tuned on the M0 spike's OCR text (93k tokens): at floor 3.0
+it accepts 97.8% of real dialogue tokens before any show vocabulary (the misses are names and
+initials, which the vocabulary covers) and accepts 3.0% of synthetically OCR-corrupted words,
+against 8.8% for Tesseract's own word list.
 """
 
 from __future__ import annotations
@@ -24,10 +25,7 @@ from __future__ import annotations
 import functools
 import os
 import re
-import shutil
-import subprocess
-import tempfile
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -366,73 +364,46 @@ def _normalize(text: str) -> str:
     return normalize(text)
 
 
-def _tessdata_dir() -> Path | None:
-    env = os.environ.get("TESSDATA_PREFIX")
-    if env:
-        p = Path(env)
-        return p / "tessdata" if (p / "tessdata").is_dir() else p
-    try:
-        out = subprocess.run(
-            [pytesseract.pytesseract.tesseract_cmd, "--list-langs"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        ).stdout
-    except (OSError, subprocess.SubprocessError):
-        return None
-    m = re.search(r'"([^"]+)"', out)
-    return Path(m.group(1)) if m else None
+WORD_ZIPF_FLOOR = 3.0
+_SHORT_WORDS = frozenset(
+    "a i am an as at be by do go he hi if in is it me my no of oh ok on or so to up us we "
+    "ya yo ah uh um mm ha hm eh em id im mr dr st".split()
+)
+_CONTRACTION_SUFFIXES = (("s", 1), ("t", 1), ("d", 1), ("ll", 2), ("re", 2), ("ve", 2), ("m", 1))
 
 
-def parse_wordlist(lines: Iterable[str]) -> frozenset[str]:
-    """Dictionary entries -> normalized form (lowercase, apostrophes dropped); entries with
-    other non-letters (URLs, hyphenations, numbers) are skipped."""
-    words = set()
-    for line in lines:
-        w = line.strip().lower().replace("'", "")
-        if w.isalpha():
-            words.add(w)
-    return frozenset(words)
+def _zipf(word: str, language: str) -> float:
+    from wordfreq import zipf_frequency
+
+    best = zipf_frequency(word, language)
+    if language == "en":
+        cands = []
+        for suf, n in _CONTRACTION_SUFFIXES:
+            if word.endswith(suf) and len(word) > n + 1:
+                cands.append(f"{word[:-n]}'{suf}")
+        if word.endswith("nt") and len(word) > 3:
+            cands.append(f"{word[:-2]}n't")
+        if word == "maam":
+            cands.append("ma'am")
+        best = max([best] + [zipf_frequency(c, language) for c in cands])
+    return best
 
 
-@functools.lru_cache(maxsize=8)
-def dictionary(language: str) -> frozenset[str]:
-    """Tesseract's word list for the language (see module docstring); empty if unavailable."""
-    lang = ocr_language(language)
-    tessdata = _tessdata_dir()
-    combine, dawg2 = shutil.which("combine_tessdata"), shutil.which("dawg2wordlist")
-    if tessdata is None or combine is None or dawg2 is None:
-        return frozenset()
-    traineddata = tessdata / f"{lang}.traineddata"
-    if not traineddata.is_file():
-        return frozenset()
-    with tempfile.TemporaryDirectory(prefix="showvenist-dict-") as tmp:
-        prefix = str(Path(tmp) / f"{lang}.")
-        try:
-            subprocess.run(
-                [combine, "-u", str(traineddata), prefix],
-                capture_output=True,
-                check=True,
-                timeout=60,
-            )
-            out = Path(tmp) / "words.txt"
-            subprocess.run(
-                [dawg2, prefix + "lstm-unicharset", prefix + "lstm-word-dawg", str(out)],
-                capture_output=True,
-                check=True,
-                timeout=60,
-            )
-            return parse_wordlist(out.read_text(encoding="utf-8", errors="replace").splitlines())
-        except (OSError, subprocess.SubprocessError):
-            return frozenset()
+@functools.lru_cache(maxsize=65536)
+def is_word(word: str, language: str = "en") -> bool:
+    """True if `word` (normalized: lowercase, no apostrophes) is an ordinary word."""
+    if word.isdigit():
+        return True
+    if len(word) <= 2:
+        return language == "en" and word in _SHORT_WORDS
+    return _zipf(word, language) >= WORD_ZIPF_FLOOR
 
 
 def ocr_quality(texts: list[str], vocabulary: set[str], language: str = "en") -> float | None:
-    """Share of the texts' normalized words found in vocabulary ∪ the language dictionary.
+    """Share of the texts' normalized words found in vocabulary or accepted by is_word().
     None when there are no words. ``vocabulary`` holds normalized words (show subtitles and
     bundle text)."""
     words = [w for t in texts for w in _normalize(t).split()]
     if not words:
         return None
-    dic = dictionary(language)
-    return sum(w in vocabulary or w in dic for w in words) / len(words)
+    return sum(w in vocabulary or is_word(w, language) for w in words) / len(words)

@@ -220,23 +220,21 @@ def test_ocr_fixes_pipe_to_i(monkeypatch):
 # --------------------------------------------------------------------------- quality
 
 
-def test_parse_wordlist_normalizes():
-    words = ocr.parse_wordlist(["Hello", "don't", "RSS/Atom", "Ohio-Meadville", "x2", " Sam \n"])
-    assert words == {"hello", "dont", "sam"}
+def test_is_word_contractions_short_words_and_ocr_junk():
+    for w in ("the", "theyre", "wouldnt", "youve", "maam", "howd", "okay", "gonna", "a", "i", "oh"):
+        assert ocr.is_word(w), w
+    for w in ("tbe", "rn", "ii", "lt", "th", "cl", "wliat", "qzxv", "w0rry"):
+        assert not ocr.is_word(w), w
+    assert ocr.is_word("1999")
 
 
-def test_ocr_quality_uses_vocabulary_and_dictionary(monkeypatch):
-    monkeypatch.setattr(ocr, "dictionary", lambda lang: frozenset({"the", "car", "is", "red"}))
+def test_ocr_quality_uses_vocabulary_and_word_check():
     q = ocr_quality(["The car is red.", "Winchester qzxv"], {"winchester"})
     assert q == pytest.approx(5 / 6)
     assert ocr_quality([], set()) is None
     assert ocr_quality(["...", ""], set()) is None
 
 
-@needs_tesseract
-def test_tesseract_dictionary_available():
-    d = ocr.dictionary("en")
-    if not d:
-        pytest.skip("combine_tessdata/dawg2wordlist not installed")
-    assert {"the", "night", "dont", "safe"} <= d
-    assert ocr_quality(["Don't leave tonight."], set()) == 1.0
+def test_ocr_quality_junk_scores_low_and_real_dialogue_high():
+    assert ocr_quality(["Don't leave tonight, they're coming."], set()) == 1.0
+    assert ocr_quality(["tbe wliat rn ii lt qzxv"], set()) == 0.0

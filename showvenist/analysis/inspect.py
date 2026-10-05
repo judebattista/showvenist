@@ -48,7 +48,12 @@ def inspect_file(
         err = f" (read failed: {w.error})" if w.error else ""
         out.append(f"  {w.start_s:8.1f} - {w.end_s:8.1f} s: {w.lines} lines{err}")
     q = d.ocr_quality
-    out.append(f"ocr quality:  {'n/a' if q is None else f'{q:.2f}'}")
+    from showvenist.analysis.ocr import WORD_ZIPF_FLOOR
+
+    out.append(
+        f"ocr quality:  {'n/a' if q is None else f'{q:.2f}'}"
+        f"  (wordfreq zipf>={WORD_ZIPF_FLOOR}, vocabulary {len(vocabulary)} words)"
+    )
     out.append("first cues:")
     first = [c for w in d.windows for c in w.cues][:5]
     for c in first:
