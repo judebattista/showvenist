@@ -9,6 +9,7 @@ Identifies the season and episode of TV disc rips against a reference bundle for
 ## Rules
 
 - **Commit without asking:** each integrated wave once its tests pass, on the milestone's branch (`m0-spike`, `m1-bundle`, …). **Never push**; the user pushes. Subagents never commit.
+- **No spending money without permission.** Ask before any paid API call, such as the LLM scorer, cue generation or eval with `--llm`, and give the estimated cost. The LLM scorer's default mode stays `off`.
 - **Ask before installing anything:** apt packages, uv tools, `bd`, npm globals. Also ask before `bd setup claude`, which installs hooks.
 - **The library under `/mnt/storage/tv` is read-only during development.** Read it for spikes, eval and inspection. Never point code that renames, moves or deletes files at it; use synthetic fixtures or copies.
 - **No copyrighted media in tests or in git** (spec §16.4).
