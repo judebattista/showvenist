@@ -11,9 +11,11 @@ PEP 723 single-file script: `uv run spike/<script>.py`. Output goes to
 | supernatural-s02 | /mnt/storage/tv/Supernatural/Season02 | 22 (skip `…a.mkv` duplicates) | PGS |
 | the-incredible-hulk-s02 | /mnt/storage/tv/The_Incredible_Hulk/Season_02 | 22 | VobSub (expected) |
 | the-west-wing-s01 | /mnt/storage/tv/The_West_Wing/Season_01 | 22 | unknown |
-| fourth | picked after `extract.py --probe-only` | ~22 | to make two PGS + two VobSub |
+| the-invisible-man-s01 | /mnt/storage/tv/The_Invisible_Man/Season_01 | 23 | VobSub (the only labeled VobSub season; confounded with the show, accepted 2026-10-05) |
 
-Labels come from file names (aired order).
+Labels come from file names (aired order). Hulk S2 is PGS, not VobSub, so the set is 3 PGS + 1 VobSub.
+
+TMDB credentials: `~/.config/tmdb/api.key` (v3 key) and `~/.config/tmdb/api.token` (v4 read token); env `SHOWVENIST_TMDB_API_KEY` overrides. Never print or log them.
 
 ## Stage contracts
 
