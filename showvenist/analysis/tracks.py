@@ -19,7 +19,8 @@ def select_track(
     cands = [
         t
         for t in tracks
-        if t.lang and t.lang.lower() in wanted
+        if t.lang
+        and t.lang.lower() in wanted
         and not t.forced
         and t.events >= min_events
         and t.kind != "other"

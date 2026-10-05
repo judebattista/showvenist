@@ -20,7 +20,8 @@ def test_roundtrip():
 def test_config_env_overrides_file(tmp_path):
     f = tmp_path / "c.toml"
     f.write_text('[tmdb]\napi_key = "file"\n[analysis]\nocr_workers = 2\n')
-    cfg = load_config(f, env={
-        "SHOWVENIST_TMDB_API_KEY": "env", "SHOWVENIST_ANALYSIS_OCR_WORKERS": "5"})
+    cfg = load_config(
+        f, env={"SHOWVENIST_TMDB_API_KEY": "env", "SHOWVENIST_ANALYSIS_OCR_WORKERS": "5"}
+    )
     assert cfg.tmdb.api_key == "env" and cfg.analysis.ocr_workers == 5
     assert load_config(tmp_path / "none.toml", env={}).llm.mode == "off"

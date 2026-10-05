@@ -16,6 +16,14 @@ _GENERIC_ROLE = re.compile(
 )
 
 
+UNORDERED = -1  # season key for episodes missing from the aired ordering
+
+
+def season_label(season: int) -> str:
+    return "Unordered episodes" if season == UNORDERED else (
+        "Specials" if season == 0 else f"Season {season}")
+
+
 @dataclass
 class SeasonQuality:
     season: int
@@ -101,8 +109,9 @@ def quality_report(bundle: Bundle, bundle_dir: Path | None = None) -> QualityRep
     active = [e for e in bundle.episodes if not e.excluded]
     unordered = [e.id for e in active if e.id not in seen]
     if unordered:
-        by_season.setdefault(0, []).extend(byid[i] for i in unordered)
-    seasons = [_measure(s, eps, bundle_dir) for s, eps in sorted(by_season.items())]
+        by_season.setdefault(UNORDERED, []).extend(byid[i] for i in unordered)
+    order = sorted(by_season.items(), key=lambda kv: (kv[0] < 0, kv[0]))
+    seasons = [_measure(s, eps, bundle_dir) for s, eps in order]
     return QualityReport(
         overall=_measure(-1, active, bundle_dir),
         seasons=seasons,
@@ -152,7 +161,7 @@ def render(report: QualityReport) -> str:
         )
 
     for s in report.seasons:
-        lines.append(row(f"Season {s.season}" if s.season else "Unordered", s))
+        lines.append(row(season_label(s.season), s))
     lines.append(row("Overall", report.overall))
     if report.duplicate_synopses:
         lines.append("Duplicate/near-duplicate synopses:")
@@ -165,7 +174,7 @@ def render(report: QualityReport) -> str:
     preds = [
         p
         for s in report.seasons
-        if (p := _prediction(s, f"Season {s.season}" if s.season else "Unordered episodes"))
+        if (p := _prediction(s, season_label(s.season)))
     ]
     lines.append("")
     lines += preds or ["Data looks good: no major gaps expected."]

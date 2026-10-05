@@ -26,8 +26,12 @@ def _decode(path):
     out = []
     with av.open(str(path)) as c:
         s = c.streams.subtitles[0]
-        meta = {"lang": s.metadata.get("language"), "codec": s.codec_context.name,
-                "extradata": s.codec_context.extradata, "duration": c.duration / av.time_base}
+        meta = {
+            "lang": s.metadata.get("language"),
+            "codec": s.codec_context.name,
+            "extradata": s.codec_context.extradata,
+            "duration": c.duration / av.time_base,
+        }
         for pkt in c.demux(s):
             if pkt.pts is None or not pkt.size:
                 continue
@@ -102,8 +106,9 @@ def test_pgs_packets_are_bare_segments(tmp_path):
 
 
 def test_long_sparse_duration(tmp_path):
-    path = make_mkv_with_bitmap_subs(tmp_path / "long.mkv", [(600.0, 602.0, "Late line")],
-                                     "vobsub", duration_s=1200)
+    path = make_mkv_with_bitmap_subs(
+        tmp_path / "long.mkv", [(600.0, 602.0, "Late line")], "vobsub", duration_s=1200
+    )
     events, meta = _decode(path)
     assert meta["duration"] == pytest.approx(1200, abs=2)
     assert [round(t) for t, _ in events] == [600]

@@ -85,6 +85,7 @@ VOBSUB_PALETTE = ["000000", "ffffff"] + ["808080"] * 14
 
 # --------------------------------------------------------------------------- rendering
 
+
 def render_text(text: str, max_size: tuple[int, int]) -> np.ndarray:
     """Render text as a binary bitmap (uint8, 1 = ink, 0 = clear), cropped to the ink."""
     if not text.strip():
@@ -94,11 +95,12 @@ def render_text(text: str, max_size: tuple[int, int]) -> np.ndarray:
     bbox = probe.multiline_textbbox((0, 0), text, font=font, align="center", spacing=8)
     x0, y0, x1, y1 = (int(v) for v in bbox)
     img = Image.new("L", (x1 - x0 + 10, y1 - y0 + 10), 0)
-    ImageDraw.Draw(img).multiline_text((4 - x0, 4 - y0), text, fill=255, font=font,
-                                       align="center", spacing=8)
+    ImageDraw.Draw(img).multiline_text(
+        (4 - x0, 4 - y0), text, fill=255, font=font, align="center", spacing=8
+    )
     bits = (np.asarray(img) >= 128).astype(np.uint8)
     rows, cols = np.flatnonzero(bits.any(1)), np.flatnonzero(bits.any(0))
-    bits = bits[rows[0]:rows[-1] + 1, cols[0]:cols[-1] + 1]
+    bits = bits[rows[0] : rows[-1] + 1, cols[0] : cols[-1] + 1]
     h, w = bits.shape
     if w > max_size[0] or h > max_size[1]:
         raise ValueError(f"rendered cue {text!r} ({w}x{h}) exceeds canvas {max_size}")
@@ -120,6 +122,7 @@ def _runs(row: np.ndarray) -> list[tuple[int, int]]:
 
 
 # --------------------------------------------------------------------------- PGS
+
 
 def _pgs_rle(bits: np.ndarray) -> bytes:
     out = bytearray()
@@ -145,8 +148,7 @@ def _seg(kind: int, body: bytes) -> bytes:
 
 
 def _pgs_pcs(size, comp_no, state, obj: tuple[int, int] | None) -> bytes:
-    body = struct.pack(">HHBHBBBB", size[0], size[1], 0x10, comp_no, state, 0, 0,
-                       1 if obj else 0)
+    body = struct.pack(">HHBHBBBB", size[0], size[1], 0x10, comp_no, state, 0, 0, 1 if obj else 0)
     if obj:
         body += struct.pack(">HBBHH", 0, 0, 0, obj[0], obj[1])
     return _seg(0x16, body)
@@ -169,6 +171,7 @@ def _pgs_display_sets(bits: np.ndarray, size, comp_no: int) -> tuple[bytes, byte
 
 
 # --------------------------------------------------------------------------- VobSub
+
 
 class _Nibbles:
     def __init__(self):
@@ -208,13 +211,27 @@ def _vob_spu(bits: np.ndarray, size, duration_s: float) -> bytes:
     bot_off = top_off + len(top)
     ctrl1 = 4 + len(top) + len(bottom)
     x2, y2 = x + w - 1, y + h - 1
-    cmds1 = (b"\x01"
-             + b"\x03" + bytes([0x00, 0x10])  # code1 -> palette 1, code0 -> palette 0
-             + b"\x04" + bytes([0x00, 0xF0])  # code1 alpha 15, others 0
-             + b"\x05" + bytes([x >> 4, (x & 0xF) << 4 | x2 >> 8, x2 & 0xFF,
-                               y >> 4, (y & 0xF) << 4 | y2 >> 8, y2 & 0xFF])
-             + b"\x06" + struct.pack(">HH", top_off, bot_off)
-             + b"\xff")
+    cmds1 = (
+        b"\x01"
+        + b"\x03"
+        + bytes([0x00, 0x10])  # code1 -> palette 1, code0 -> palette 0
+        + b"\x04"
+        + bytes([0x00, 0xF0])  # code1 alpha 15, others 0
+        + b"\x05"
+        + bytes(
+            [
+                x >> 4,
+                (x & 0xF) << 4 | x2 >> 8,
+                x2 & 0xFF,
+                y >> 4,
+                (y & 0xF) << 4 | y2 >> 8,
+                y2 & 0xFF,
+            ]
+        )
+        + b"\x06"
+        + struct.pack(">HH", top_off, bot_off)
+        + b"\xff"
+    )
     ctrl2 = ctrl1 + 4 + len(cmds1)
     stop_date = max(1, round(duration_s * 90000 / 1024))
     seq1 = struct.pack(">HH", 0, ctrl2) + cmds1
@@ -227,6 +244,7 @@ def _vob_spu(bits: np.ndarray, size, duration_s: float) -> bytes:
 
 
 # --------------------------------------------------------------------------- muxing
+
 
 def make_mkv_with_bitmap_subs(
     path: str | Path,
@@ -274,8 +292,9 @@ def make_mkv_with_bitmap_subs(
         ss.time_base = MS
         ss.metadata["language"] = lang
 
-        black = av.VideoFrame.from_ndarray(np.zeros((vs.height, vs.width, 3), np.uint8),
-                                           format="rgb24")
+        black = av.VideoFrame.from_ndarray(
+            np.zeros((vs.height, vs.width, 3), np.uint8), format="rgb24"
+        )
         nframes = max(1, int(np.ceil(total * VIDEO_FPS)))
         ei = 0
         for f in range(nframes):

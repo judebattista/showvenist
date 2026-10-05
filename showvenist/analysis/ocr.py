@@ -382,11 +382,19 @@ def dictionary(language: str) -> frozenset[str]:
     with tempfile.TemporaryDirectory(prefix="showvenist-dict-") as tmp:
         prefix = str(Path(tmp) / f"{lang}.")
         try:
-            subprocess.run([combine, "-u", str(traineddata), prefix], capture_output=True,
-                           check=True, timeout=60)
+            subprocess.run(
+                [combine, "-u", str(traineddata), prefix],
+                capture_output=True,
+                check=True,
+                timeout=60,
+            )
             out = Path(tmp) / "words.txt"
-            subprocess.run([dawg2, prefix + "lstm-unicharset", prefix + "lstm-word-dawg",
-                            str(out)], capture_output=True, check=True, timeout=60)
+            subprocess.run(
+                [dawg2, prefix + "lstm-unicharset", prefix + "lstm-word-dawg", str(out)],
+                capture_output=True,
+                check=True,
+                timeout=60,
+            )
             return parse_wordlist(out.read_text(encoding="utf-8", errors="replace").splitlines())
         except (OSError, subprocess.SubprocessError):
             return frozenset()

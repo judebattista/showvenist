@@ -80,9 +80,11 @@ def test_pgs_palette_without_pds_is_identity():
 
 # --------------------------------------------------------------------------- VobSub palette
 
-IDX = b"size: 720x480\npalette: 000000, ffffff, 808080, 101010, " + b", ".join(
-    [b"000000"] * 12
-) + b"\n"
+IDX = (
+    b"size: 720x480\npalette: 000000, ffffff, 808080, 101010, "
+    + b", ".join([b"000000"] * 12)
+    + b"\n"
+)
 
 
 def _vob_packet(colors: tuple[int, int, int, int], alphas: tuple[int, int, int, int]) -> bytes:
@@ -94,8 +96,10 @@ def _vob_packet(colors: tuple[int, int, int, int], alphas: tuple[int, int, int, 
         struct.pack(">HH", 0, ctrl)  # delay, next = self (last block)
         + bytes([0x03, c[3] << 4 | c[2], c[1] << 4 | c[0]])
         + bytes([0x04, a[3] << 4 | a[2], a[1] << 4 | a[0]])
-        + bytes([0x05]) + bytes(6)
-        + bytes([0x06]) + bytes(4)
+        + bytes([0x05])
+        + bytes(6)
+        + bytes([0x06])
+        + bytes(4)
         + bytes([0x01, 0xFF])
     )
     body = bytes(4) + block

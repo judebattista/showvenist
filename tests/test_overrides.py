@@ -8,8 +8,13 @@ def make() -> Bundle:
     return Bundle(
         show=ShowInfo(title="S"),
         episodes=[
-            Episode(id="tmdb:1", title="A", alt_titles=["a1"], directors=["D"],
-                    synopses=[Synopsis(source="tmdb", text="t")]),
+            Episode(
+                id="tmdb:1",
+                title="A",
+                alt_titles=["a1"],
+                directors=["D"],
+                synopses=[Synopsis(source="tmdb", text="t")],
+            ),
             Episode(id="tmdb:2", title="B"),
         ],
     ).with_revision()
@@ -22,7 +27,9 @@ def run(tmp_path, text, bundle=None):
 
 
 def test_fields(tmp_path):
-    b = run(tmp_path, """
+    b = run(
+        tmp_path,
+        """
 # comment
 episodes:
   tmdb:1:
@@ -38,7 +45,8 @@ episodes:
       - {actor: Z, character: Q}
   tmdb:2:
     excluded: true
-""")
+""",
+    )
     e1, e2 = b.episodes
     assert (e1.title, e1.air_date, e1.runtime_min) == ("New", "2020-01-02", 86)
     assert e1.alt_titles == ["a1", "a2"]
@@ -50,11 +58,14 @@ episodes:
 
 
 def test_orderings(tmp_path):
-    b = run(tmp_path, """
+    b = run(
+        tmp_path,
+        """
 orderings:
   rel:
     - { season: 1, episode: 1, episode_id: "tmdb:2" }
-""")
+""",
+    )
     o = b.orderings["rel"]
     assert o.entries[0].episode_id == "tmdb:2" and o.source == "overrides"
 

@@ -29,6 +29,9 @@ def test_none_cases_and_sdh_ok():
 
 
 def test_tie_prefers_text_and_unreadable_dropped():
-    ts = [T(1, "hdmv_pgs_subtitle", "eng", events=100), T(2, "ass", "eng", events=100),
-          T(3, "eia_608", "eng", events=5000)]
+    ts = [
+        T(1, "hdmv_pgs_subtitle", "eng", events=100),
+        T(2, "ass", "eng", events=100),
+        T(3, "eia_608", "eng", events=5000),
+    ]
     assert select_track(ts, "en").index == 2

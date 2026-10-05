@@ -136,9 +136,7 @@ def make_mkv_with_text_subs(
         end_str = format_ass_time(end)
 
         # Create ASS Dialogue event line
-        dialogue_line = (
-            f"Dialogue: 0,{start_str},{end_str},Default,,0,0,0,,{text}\n"
-        )
+        dialogue_line = f"Dialogue: 0,{start_str},{end_str},Default,,0,0,0,,{text}\n"
         event_text = dialogue_line.encode()
 
         event_pkt = av.Packet(event_text)
