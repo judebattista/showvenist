@@ -114,23 +114,22 @@ def process_season(client: httpx.Client, base_url: str, show_name: str, season_n
     for ep in season_data.get("episodes", []):
         # Extract guest_stars from credits
         guest_stars = []
-        if "credits" in ep:
-            guest_stars = [
-                {"actor": c.get("name", ""), "character": c.get("character", "")}
-                for c in ep["credits"].get("guest_stars", [])
-            ]
+        guest_stars = [
+            {"actor": c.get("name", ""), "character": c.get("character", "")}
+            for c in ep.get("guest_stars", [])
+        ]
 
         # Extract writers and directors from credits
         writers = []
         directors = []
-        if "credits" in ep:
-            for crew_member in ep["credits"].get("crew", []):
-                job = crew_member.get("job", "")
-                name = crew_member.get("name", "")
-                if job == "Writer":
+        for crew_member in ep.get("crew", []):
+            job = crew_member.get("job", "")
+            name = crew_member.get("name", "")
+            if job in ("Writer", "Screenplay", "Teleplay", "Story"):
+                if name not in writers:
                     writers.append(name)
-                elif job == "Director":
-                    directors.append(name)
+            elif job == "Director":
+                directors.append(name)
 
         episodes.append({
             "id": ep.get("id"),

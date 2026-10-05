@@ -403,7 +403,7 @@ def main():
     groups: dict[str, list[dict]] = {}
     with open(out / "labels.csv", newline="") as fh:
         for r in csv.DictReader(fh):
-            groups.setdefault(f"{r['show']}-s{int(r['season']):02d}", []).append(r)
+            groups.setdefault(r['show'], []).append(r)
     data = {}
     for key, rows in groups.items():
         if a.show and key not in a.show:
