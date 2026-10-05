@@ -4,7 +4,7 @@
 
 The spec says **what** to build and when a milestone is done. This plan says **how** the work is run: who does each piece (the main session or a subagent, and at which model tier), in what order, and how the pieces fit together.
 
-M0 is planned in full. M1–M7 are planned as **draft work packages**, because M0 ends in a decision that can change the spec (§17.1, decision 35). After that decision, the packages become Beads tasks and are deleted from §3 of this file, so tasks live in one place only. §1 stays as the working method. §4 lists the open items and when each one is decided.
+M0 is planned in full. M1–M7 were planned as draft work packages until M0's decision (§17.1, decision 35); they are now Beads tasks (§3), so tasks live in one place only. §1 stays as the working method. §4 lists the open items and when each one is decided.
 
 ---
 
@@ -180,124 +180,9 @@ These rules were set on 2026-10-04, before the run. They're also in the spec's M
 
 ---
 
-## 3. M1–M7: Draft work packages
+## 3. M1–M7: now in Beads
 
-*Seeds for Beads after M0. Each milestone starts with a contract wave by the orchestrator (§1.3), and packages in the same wave run in parallel. Exit criteria are the spec's (§17.2) and aren't repeated here.*
-
-### M1: Bundle, TMDB, local SRT
-
-| Package | Tier | Owns | Wave |
-|---|---|---|---|
-| Scaffold: `pyproject.toml` (uv, Python ≥ 3.11, M1–M2 dependencies), package tree from §15.1, ruff and pytest config, README with the TMDB notice, `--version` | Haiku | the files listed | 0 |
-| Contract: `bundle/schema.py` (§6.3), `config.py` (§4.6) | Orchestrator | | 1 |
-| Store, `overrides.yaml` merge, validation errors with file and line (§6.2, §6.6) | Sonnet | `bundle/store.py`, `bundle/overrides.py` | 2 |
-| TMDB adapter: search, `append_to_response`, seasons, every episode group as an ordering with slug and `type_rank`, `/find`, v3 key or v4 token; recorded fixtures with the key stripped (§6.4) | Sonnet | `adapters/tmdb.py` + fixtures | 2 |
-| Local SRT adapter (§6.4) | Haiku | `adapters/localsubs.py` | 2 |
-| Quality report + `bundle check` (§6.7) | Sonnet | `bundle/quality.py` | 2 |
-
-- Recording the fixtures needs your TMDB token once.
-- The quality report's reference cross-check row uses the M3 scorers, so it's added in M3.
-- Proposed shows for the exit criterion: Firefly (episode groups), The West Wing (large, guest-heavy), Samurai Jack (animation, likely sparse data).
-
-### M2: Analysis
-
-| Package | Tier | Owns | Wave |
-|---|---|---|---|
-| Contract: probe, track, window and dialogue types; cache API with extractor versions (§7.3) | Orchestrator | | 1 |
-| Probe, fingerprint, content key (§7.1, §8.4 stage 1) | Sonnet | `analysis/probe.py`, `state/fingerprint.py` | 2 |
-| Track selection, text subtitles, normalization (§8.2–§8.3) | Sonnet | `analysis/tracks.py`, `analysis/subtitles.py` | 2 |
-| PGS/VobSub OCR + OCR quality, ported from the spike | Sonnet | `analysis/ocr.py` | 2 |
-| PGS/VobSub fixture generator: PGS segments and VobSub SPU with RLE, muxed with PyAV (§16.4) | **Opus** | `tests/fixtures/bitmapsubs.py` | 2 |
-| Windows, escalation, cache, `inspect` (§8.4) | Sonnet | `analysis/windows.py`, `analysis/cache.py` | 2 |
-| Text-subtitle MKV fixtures (PyAV) | Haiku | `tests/fixtures/textsubs.py` | 2 |
-
-- The OCR agent writes its tests against the generator's contract (`make_mkv(path, cues, kind)`) and runs them once the generator lands.
-- If the spike's OCR needed heavy rework, the OCR port moves up to Opus.
-- M2 may run in parallel with M1 (§4, open item 1).
-
-### M3: Scoring, assignment, report, eval
-
-*M0 outcome 3 (spec decision 38): the OpenSubtitles adapter is part of M3, and the gate runs with and without reference subtitles. It needs your OpenSubtitles account.*
-
-| Package | Tier | Owns | Wave |
-|---|---|---|---|
-| Contract: `Scorer` protocol (LLR matrix + per-window scores, can-be-negative, clamp), the two regimes (§11.1), weight config, report JSON v1, manifest format (§16.1) | Orchestrator | | 1 |
-| Duration + title scorers (§9.2) | Haiku | `scoring/duration.py`, `scoring/title.py` | 2 |
-| Synopsis, guest-name and cues scorers, sharing tokenization and name removal; ported from the spike | Sonnet | `scoring/synopsis.py`, `scoring/characters.py`, `scoring/cues.py` | 2 |
-| Reference-subtitle scorer + the quality report's cross-check row (§9.2, §6.7) | Sonnet | `scoring/refsubs.py`, `bundle/quality.py` | 2 |
-| LLM scorer + cue generation via the Batches API (§10). Loads the `claude-api` skill | Sonnet | `scoring/llm.py`, `adapters/llm_cues.py` | 2 |
-| OpenSubtitles adapter, resumable within the quota (§6.4) | Sonnet | `adapters/opensubtitles.py` | 2 |
-| Fusion, basic assignment with unmatched columns, Δ, runner-up (§11.1–§11.2, §11.5, §11.7) | **Opus** | `fusion.py`, `assign/basic.py`, `assign/confidence.py` | 2 |
-| Report tables + JSON (§12.3) | Haiku | `report.py` | 2 |
-| Eval harness: manifest, label resolution through orderings, duplicate sets, every §16.1 metric including Clopper-Pearson | Sonnet | `eval/harness.py`, `eval/manifest.py` | 2 |
-| `eval --fit`: conditional logit, regularized toward defaults, extras weighted to their real share, two regimes, leave-one-season-out (§16.3) | **Opus** | `eval/fit.py` | 3 |
-| `identify --report/--json` on flat lists, exit codes (§4.3, §4.5) | Orchestrator | `cli.py` | 3 |
-
-- The LLM's disc-window scope (§10.2) needs disc folders, so it's built in M4. In M3, LLM candidates are the full season.
-- The LLM scorer's clamp comes from M0's raw log-odds (§4, open item 2).
-
-**Labels: a human task to start during M1, not at the gate.**
-
-| Package | Tier | When |
-|---|---|---|
-| Manifest script: the 422 named files → `path,show,label,order,disc`. Order is per show (Firefly → `intended-order`, since you named files chronologically). Names are matched case-insensitively: the library has both `Firefly_s01e…` and `firefly_s01e…` | Haiku | After M1 |
-| Extras labeling sheet for the 1,314 unnamed rips: duration, size, title tag, disc | Haiku | During M1 |
-
-- The sheet is sorted with **files close to episode length first**, because those matter most (§16.2). Files aren't pre-labeled by duration: the fit and eval would then be grading the duration scorer against its own guesses.
-- You label the extras; π_x is measured from them (§11.2).
-- How raw rips labeled "episode, number unknown" are used is decided in the M3 contract (§4, open item 3).
-
-**M3 gate** (orchestrator + you): eval in four setups, {base, LLM} × {cues off, cues on}. The orchestrator writes the analysis; you decide go or adjust.
-
-### M4: Hierarchy and block model
-
-| Package | Tier | Owns | Wave |
-|---|---|---|---|
-| Contract: tree and disc types, block solver interface | Orchestrator | | 1 |
-| Folder, volume-label and title-tag parsing; creation-time disc order suggestion; tests from `data/mkv-titles.tsv` (§5.1) | Sonnet | `hierarchy/parse.py` | 2 |
-| Files already named (§5.5), marker file, show disambiguation, Jellyfin ID hint (§5.4) | Haiku | `hierarchy/marker.py`, `hierarchy/named.py` | 2 |
-| Readiness: size/mtime stability + Matroska duration and cues (§5.2) | Sonnet | `hierarchy/readiness.py` | 2 |
-| Concurrent read/OCR pipeline (§8.5) | Sonnet | `analysis/pipeline.py` | 2 |
-| Block DP with block-score caching, ordering detection, season hard filter + out-of-scope warning, `--episodes`, LLM disc window (§10.2, §11.3, §11.5–§11.6) | **Opus** | `assign/blocks.py`, `assign/ordering.py` | 2 |
-
-- `data/mkv-titles.tsv` is gitignored. Its test cases are copied into a test table, as basenames and tags only.
-- The default name patterns (§5.5) match case-insensitively, for the same reason as the manifest script.
-
-### M5: State and renames
-
-| Package | Tier | Owns | Wave |
-|---|---|---|---|
-| Contract: `state.db` DDL (§7.2), migrator, plan types | Orchestrator | | 1 |
-| History, history prior + duplicate warnings, confirmed extras, `assign`, `history`, `forget`, `eval --from-history` | Sonnet | `state/db.py`, `state/migrations.py`, `state/history.py` | 2 |
-| Move plan, sidecars, extras moves, collision/permission/cross-filesystem checks, move log + crash recovery, undo (§13); crash test kills a subprocess between `planned` and `done` | **Opus** | `rename/*` | 2 |
-
-### M6: TUI
-
-| Package | Tier | Owns | Wave |
-|---|---|---|---|
-| Contract: `Session` API with an event stream for live updates (§12.1) | Orchestrator | `session.py` (signatures) | 1 |
-| `Session` implementation over the engine | Sonnet | `session.py` | 2 |
-| Textual app: tree pane, evidence pane, keys, pin → re-solve → next least-confident file, plan screen, startup dialogs, Pilot flow tests (§12.2). One agent, because the panes share state | Sonnet | `tui/*` | 3 |
-| Snapshot tests | Haiku | `tests/tui/test_snapshots.py` | 4 |
-
-- Exit includes you testing over SSH from Windows Terminal.
-
-### M7: More adapters
-
-**M7 depends only on the gate, so it can run alongside M4–M6.**
-
-| Package | Tier | Owns | Wave |
-|---|---|---|---|
-| TVmaze adapter | Haiku | `adapters/tvmaze.py` | 1 |
-| Wikipedia adapter: MediaWiki API, `{{Episode list}}`, transclusion | Sonnet | `adapters/wikipedia.py` | 1 |
-| Multi-source merge with content alignment and recorded conflicts (§6.5) | **Opus** | `bundle/merge.py` | 1 |
-| `bundle edit` + `--refresh` diff (§6.6, §6.8) | Sonnet | `bundle/edit.py`, `bundle/diff.py` | 1 |
-| Eval with reference subtitles, n-gram survival, OCR-quality thresholds | Orchestrator + Sonnet | `eval/*` | 2 |
-
-
-### Rough size
-
-About 50 agent runs across M0–M7: roughly 12 Haiku, 23 Sonnet and 14 Opus (7 of the Opus runs are milestone reviews).
+Created 2026-10-05, after the M0 decision (spec decision 38). Run `bd ready` for the next unblocked tasks and `bd list --all` for everything. Each milestone is an epic whose tasks point at spec sections and carry `tier:` and `wave:` labels; the notes that used to be here are in the epics' notes. The M3 gate is its own task and blocks M4 and M7. M2 is deliberately not blocked by M1 (§4, item 1). Beads data is local to eweb (the Dolt database is gitignored) and is backed up to `data/beads-backup/` (`bd backup sync`; it also runs automatically).
 
 ---
 
@@ -307,6 +192,6 @@ Each is decided at the point named, not before.
 
 | # | Item | Decided | Notes |
 |---|---|---|---|
-| 1 | Run M1 and M2 in parallel | After M0, before the Beads epics | M2 needs only two values from M1: the bundle's language and a vocabulary for OCR quality. With those in the contract, M2 doesn't have to wait. The spec chains M1 → M2, so the dependency in Beads changes only if you agree |
+| 1 | Run M1 and M2 in parallel | **Decided 2026-10-05: yes** | M2 needs only two values from M1: the bundle's language and a vocabulary for OCR quality, fixed in the M2 contract. In Beads M2 is not blocked by M1; M3 is blocked by both |
 | 2 | The LLM scorer's default clamp (spec §9.2) | M3 contract, from M0's raw log-odds | At ±3 with weight 1, LLM evidence can't reach high (§2.4). Fitting the weight alone isn't enough: a ±3 clamp makes a 99%-confident answer look the same as an 80% one, and a larger weight inflates both |
 | 3 | Raw rips labeled "episode, number unknown" | M3 contract | They can count toward unmatched precision and recall, but not toward top-1 |

@@ -1067,7 +1067,7 @@ To exercise every signal, the target variety is:
 
 - **This spec owns the milestones:** goal, scope, exit criteria and order.
 - **Beads (`bd`) owns the tasks.** One epic per milestone, with tasks that point to spec sections (e.g. "implements §11.5 block DP").
-- Order is enforced with **"blocks" dependencies** between epics: **M0** → M1 → M2 → M3 → **M3 gate** → M4 → M5 → M6, and M7 is blocked by the gate. M0 ended in outcome 3 (decision 38), which moved the OpenSubtitles adapter from M7 into M3; Beads epics for M1 onward are created after this revision is reviewed. The gate is an explicit task that blocks everything after it.
+- Order is enforced with **"blocks" dependencies** between epics: **M0** → (M1 ∥ M2) → M3 → **M3 gate** → M4 → M5 → M6, and M7 is blocked by the gate. M1 and M2 run in parallel (M2 needs only the bundle's language and an OCR vocabulary from M1, fixed in its contract). M0 ended in outcome 3 (decision 38), which moved the OpenSubtitles adapter from M7 into M3; Beads epics for M1 onward are created after this revision is reviewed. The gate is an explicit task that blocks everything after it.
 - The spec contains no task lists, so the two can't drift apart.
 
 ### 17.2 v1 milestones
