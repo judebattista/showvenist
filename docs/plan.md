@@ -1,10 +1,10 @@
 # showvenist: Implementation plan
 
-**Status:** Draft · **Date:** 2026-10-04 · **Builds:** spec v0.2 (`docs/spec.md`)
+**Status:** Agreed · **Date:** 2026-10-04 · **Builds:** spec v0.2 with decisions 1–37 (`docs/spec.md`)
 
 The spec says **what** to build and when a milestone is done. This plan says **how** the work is run: who does each piece (the main session or a subagent, and at which model tier), in what order, and how the pieces fit together.
 
-M0 is planned in full. M1–M7 are planned as **draft work packages**, because M0 ends in a decision that can change the spec (§17.1, decision 35). After that decision, the packages become Beads tasks and are deleted from §3 of this file, so tasks live in one place only. §1 stays as the working method.
+M0 is planned in full. M1–M7 are planned as **draft work packages**, because M0 ends in a decision that can change the spec (§17.1, decision 35). After that decision, the packages become Beads tasks and are deleted from §3 of this file, so tasks live in one place only. §1 stays as the working method. §4 lists the open items and when each one is decided.
 
 ---
 
@@ -75,6 +75,19 @@ Report (≤ 15 lines): what you did, deviations, open issues.
 ## 2. M0: Feasibility spike
 
 Throwaway code in `spike/`, not part of the package (§17.2). Each script is a PEP 723 single-file script (`uv run spike/x.py`) that declares its own dependencies, so agents never share a `pyproject.toml`. Output goes to `spike/out/`, which is gitignored.
+
+### 2.0 Starting on eweb
+
+| Step | Who |
+|---|---|
+| Push `implementation-plan`, then merge it or check it out on eweb | You |
+| Install Claude Code on eweb and clone the repo there | You |
+| Put the TMDB token in `SHOWVENIST_TMDB_API_KEY` or the config file (§4.6) | You |
+| Copy `data/mkv-titles.tsv` over (needed from M4, not for M0) | You |
+| Install `tesseract-ocr`, `tesseract-ocr-eng` and `uv` | Orchestrator, after asking |
+| Create the `m0-spike` branch and start wave 1 | Orchestrator |
+
+An Anthropic API key is needed only if 0.5 runs, and that's asked for at the time.
 
 ### 2.1 Data
 
@@ -162,7 +175,7 @@ These rules were set on 2026-10-04, before the run. They're also in the spec's M
 
 1. Spec revision if needed: the orchestrator drafts it and you review it.
 2. Beads: install `bd` (asked first); check for `.beads/` with embedded Dolt in git; `bd init`.
-3. Create epics M1–M7 and the M3 gate task, with blocks dependencies.
+3. Decide open item 1 (§4). Then create epics M1–M7 and the M3 gate task, with blocks dependencies.
 4. Turn §3's packages into tasks and delete §3 from this file.
 
 ---
@@ -200,8 +213,7 @@ These rules were set on 2026-10-04, before the run. They're also in the spec's M
 
 - The OCR agent writes its tests against the generator's contract (`make_mkv(path, cues, kind)`) and runs them once the generator lands.
 - If the spike's OCR needed heavy rework, the OCR port moves up to Opus.
-
-**Suggestion:** M2 needs only two values from M1, the bundle's language and a vocabulary for OCR quality. With those in the contract, M1 and M2 can run in parallel. The spec chains M1 → M2, so that's your call.
+- M2 may run in parallel with M1 (§4, open item 1).
 
 ### M3: Scoring, assignment, report, eval
 
@@ -219,19 +231,20 @@ These rules were set on 2026-10-04, before the run. They're also in the spec's M
 | `identify --report/--json` on flat lists, exit codes (§4.3, §4.5) | Orchestrator | `cli.py` | 3 |
 
 - The LLM's disc-window scope (§10.2) needs disc folders, so it's built in M4. In M3, LLM candidates are the full season.
+- The LLM scorer's clamp comes from M0's raw log-odds (§4, open item 2).
 
 **Labels: a human task to start during M1, not at the gate.**
 
 | Package | Tier | When |
 |---|---|---|
-| Manifest script, run on eweb: the 422 named files → `path,show,label,order,disc`. Order is per show (Firefly → `intended-order`, since you named files chronologically) | Haiku | After M1 |
+| Manifest script: the 422 named files → `path,show,label,order,disc`. Order is per show (Firefly → `intended-order`, since you named files chronologically). Names are matched case-insensitively: the library has both `Firefly_s01e…` and `firefly_s01e…` | Haiku | After M1 |
 | Extras labeling sheet for the 1,314 unnamed rips: duration, size, title tag, disc | Haiku | During M1 |
 
 - The sheet is sorted with **files close to episode length first**, because those matter most (§16.2). Files aren't pre-labeled by duration: the fit and eval would then be grading the duration scorer against its own guesses.
 - You label the extras; π_x is measured from them (§11.2).
-- **Open item for the M3 contract:** a raw rip labeled "episode, number unknown" can count toward unmatched precision and recall, but not toward top-1.
+- How raw rips labeled "episode, number unknown" are used is decided in the M3 contract (§4, open item 3).
 
-**M3 gate** (orchestrator + you): eval on eweb in four setups, {base, LLM} × {cues off, cues on}. The orchestrator writes the analysis; you decide go or adjust.
+**M3 gate** (orchestrator + you): eval in four setups, {base, LLM} × {cues off, cues on}. The orchestrator writes the analysis; you decide go or adjust.
 
 ### M4: Hierarchy and block model
 
@@ -245,6 +258,7 @@ These rules were set on 2026-10-04, before the run. They're also in the spec's M
 | Block DP with block-score caching, ordering detection, season hard filter + out-of-scope warning, `--episodes`, LLM disc window (§10.2, §11.3, §11.5–§11.6) | **Opus** | `assign/blocks.py`, `assign/ordering.py` | 2 |
 
 - `data/mkv-titles.tsv` is gitignored. Its test cases are copied into a test table, as basenames and tags only.
+- The default name patterns (§5.5) match case-insensitively, for the same reason as the manifest script.
 
 ### M5: State and renames
 
@@ -283,3 +297,15 @@ These rules were set on 2026-10-04, before the run. They're also in the spec's M
 ### Rough size
 
 About 50 agent runs across M0–M7: roughly 12 Haiku, 23 Sonnet and 14 Opus (7 of the Opus runs are milestone reviews).
+
+---
+
+## 4. Open items
+
+Each is decided at the point named, not before.
+
+| # | Item | Decided | Notes |
+|---|---|---|---|
+| 1 | Run M1 and M2 in parallel | After M0, before the Beads epics | M2 needs only two values from M1: the bundle's language and a vocabulary for OCR quality. With those in the contract, M2 doesn't have to wait. The spec chains M1 → M2, so the dependency in Beads changes only if you agree |
+| 2 | The LLM scorer's default clamp (spec §9.2) | M3 contract, from M0's raw log-odds | At ±3 with weight 1, LLM evidence can't reach high (§2.4). Fitting the weight alone isn't enough: a ±3 clamp makes a 99%-confident answer look the same as an 80% one, and a larger weight inflates both |
+| 3 | Raw rips labeled "episode, number unknown" | M3 contract | They can count toward unmatched precision and recall, but not toward top-1 |
