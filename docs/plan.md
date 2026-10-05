@@ -217,6 +217,8 @@ These rules were set on 2026-10-04, before the run. They're also in the spec's M
 
 ### M3: Scoring, assignment, report, eval
 
+*M0 outcome 3 (spec decision 38): the OpenSubtitles adapter is part of M3, and the gate runs with and without reference subtitles. It needs your OpenSubtitles account.*
+
 | Package | Tier | Owns | Wave |
 |---|---|---|---|
 | Contract: `Scorer` protocol (LLR matrix + per-window scores, can-be-negative, clamp), the two regimes (§11.1), weight config, report JSON v1, manifest format (§16.1) | Orchestrator | | 1 |
@@ -224,6 +226,7 @@ These rules were set on 2026-10-04, before the run. They're also in the spec's M
 | Synopsis, guest-name and cues scorers, sharing tokenization and name removal; ported from the spike | Sonnet | `scoring/synopsis.py`, `scoring/characters.py`, `scoring/cues.py` | 2 |
 | Reference-subtitle scorer + the quality report's cross-check row (§9.2, §6.7) | Sonnet | `scoring/refsubs.py`, `bundle/quality.py` | 2 |
 | LLM scorer + cue generation via the Batches API (§10). Loads the `claude-api` skill | Sonnet | `scoring/llm.py`, `adapters/llm_cues.py` | 2 |
+| OpenSubtitles adapter, resumable within the quota (§6.4) | Sonnet | `adapters/opensubtitles.py` | 2 |
 | Fusion, basic assignment with unmatched columns, Δ, runner-up (§11.1–§11.2, §11.5, §11.7) | **Opus** | `fusion.py`, `assign/basic.py`, `assign/confidence.py` | 2 |
 | Report tables + JSON (§12.3) | Haiku | `report.py` | 2 |
 | Eval harness: manifest, label resolution through orderings, duplicate sets, every §16.1 metric including Clopper-Pearson | Sonnet | `eval/harness.py`, `eval/manifest.py` | 2 |
@@ -287,12 +290,10 @@ These rules were set on 2026-10-04, before the run. They're also in the spec's M
 |---|---|---|---|
 | TVmaze adapter | Haiku | `adapters/tvmaze.py` | 1 |
 | Wikipedia adapter: MediaWiki API, `{{Episode list}}`, transclusion | Sonnet | `adapters/wikipedia.py` | 1 |
-| OpenSubtitles adapter, resumable within the quota | Sonnet | `adapters/opensubtitles.py` | 1 |
 | Multi-source merge with content alignment and recorded conflicts (§6.5) | **Opus** | `bundle/merge.py` | 1 |
 | `bundle edit` + `--refresh` diff (§6.6, §6.8) | Sonnet | `bundle/edit.py`, `bundle/diff.py` | 1 |
 | Eval with reference subtitles, n-gram survival, OCR-quality thresholds | Orchestrator + Sonnet | `eval/*` | 2 |
 
-- The OpenSubtitles exit criterion needs your account.
 
 ### Rough size
 
