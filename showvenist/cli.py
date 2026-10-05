@@ -143,6 +143,128 @@ def inspect_cmd(
     typer.echo(inspect_file(file, language, vocab, load_config().analysis, cache))
 
 
+def _expand(paths: list[Path]) -> list[Path]:
+    out: list[Path] = []
+    for p in paths:
+        out += sorted(p.rglob("*.mkv")) if p.is_dir() else [p]
+    return out
+
+
+def _resolve_bundle(show: str, root: Path | None):
+    from showvenist.bundle.overrides import BundleError
+    from showvenist.bundle.store import bundle_path, load_bundle, slugify
+
+    slug = show if (bundle_path(show, root) / "show.json").exists() else slugify(show)
+    try:
+        return slug, load_bundle(slug, root)
+    except BundleError as e:
+        typer.echo(f"{e}\nRun: showvenist ingest {show!r}", err=True)
+        raise typer.Exit(1) from None
+
+
+@app.command()
+def identify(
+    paths: list[Path] = typer.Argument(..., exists=True, help="Files or directories"),
+    show: str = typer.Option(..., "--show", help="Bundle slug or show title"),
+    season: int | None = typer.Option(None, "--season"),
+    episodes: str | None = typer.Option(None, "--episodes", help="e.g. S02E05,S02E09"),
+    order: str = typer.Option("aired", "--order", help="Matching ordering in the bundle"),
+    include_specials: bool = typer.Option(False, "--include-specials"),
+    as_json: bool = typer.Option(False, "--json", help="Emit the versioned JSON report"),
+    root: Path | None = typer.Option(None, "-o", help="Bundle root directory"),
+) -> None:
+    """Identify files against a show's bundle (report mode; never touches the media)."""
+    import re
+
+    from showvenist.analysis.cache import AnalysisCache
+    from showvenist.bundle.store import bundle_path
+    from showvenist.config import cache_dir, load_config
+    from showvenist.report import exit_code, render_tables, to_json
+    from showvenist.session import Session
+
+    slug, bundle = _resolve_bundle(show, root)
+    cfg = load_config()
+    wanted = None
+    if episodes:
+        wanted = {(int(a), int(b)) for a, b in re.findall(r"[sS](\d+)[eE](\d+)", episodes)}
+    cache_dir().mkdir(parents=True, exist_ok=True)
+    sess = Session(
+        bundle, bundle_path(slug, root), cfg, ordering=order, season=season, episodes=wanted,
+        include_specials=include_specials, cache=AnalysisCache(cache_dir() / "analysis.db"),
+    )
+    files = _expand(paths)
+
+    def progress(done, total, path, error):
+        typer.echo(f"[{done}/{total}] {path.name}" + (f"  ERROR {error}" if error else ""),
+                   err=True)
+
+    sess.analyze(files, progress=progress)
+    sess.score()
+    sess.solve()
+    report = sess.report()
+    typer.echo(to_json(report) if as_json else render_tables(report))
+    raise typer.Exit(exit_code(report))
+
+
+@app.command("eval")
+def eval_cmd(
+    manifest: Path = typer.Argument(..., exists=True, dir_okay=False),
+    root: Path | None = typer.Option(None, "-o", help="Bundle root directory"),
+    library: Path | None = typer.Option(
+        None, "--library", help="Prefix for relative manifest paths (read-only library root)"
+    ),
+    fit: bool = typer.Option(False, "--fit", help="Fit weights (leave-one-season-out)"),
+    lam: float = typer.Option(1.0, "--lam", help="Ridge strength toward the defaults"),
+    write: bool = typer.Option(False, "--write", help="Write fitted weights to config.toml"),
+) -> None:
+    """Accuracy harness and weight fitting over a labeled manifest (no LLM, no paid calls)."""
+    from showvenist.analysis.cache import AnalysisCache
+    from showvenist.bundle.store import bundle_path, load_bundle
+    from showvenist.config import cache_dir, config_dir, load_config
+    from showvenist.eval.fit import fit_loso, format_fit_report, write_weights
+    from showvenist.eval.manifest import read_manifest
+    from showvenist.eval.render import fit_items, format_eval
+    from showvenist.eval.runner import run_eval
+    from showvenist.eval.types import ManifestRow
+
+    rows = read_manifest(manifest)
+    if library is not None:
+        rows = [ManifestRow(str(library / r.path), r.show, r.label, r.order, r.disc) for r in rows]
+    slugs = sorted({r.show for r in rows})
+    bundles, dirs = {}, {}
+    for s in slugs:
+        try:
+            bundles[s], dirs[s] = load_bundle(s, root), bundle_path(s, root)
+        except Exception as e:  # missing bundle: the rows become Problems in the harness
+            typer.echo(f"bundle {s}: {e}", err=True)
+    cache_dir().mkdir(parents=True, exist_ok=True)
+    items = []
+
+    def on_group(g):
+        from showvenist.eval.runner import evidence_table
+
+        key = f"{g.show}-S{g.season or 0:02d}"
+        items.extend(fit_items(evidence_table(g.solution, g.labels), key))
+
+    def progress(done, total, path, error):
+        if done % 10 == 0 or done == total or error:
+            typer.echo(f"[{done}/{total}] {path.name}" + (f"  ERROR {error}" if error else ""),
+                       err=True)
+
+    _, result = run_eval(
+        rows, bundles, load_config(), dirs, AnalysisCache(cache_dir() / "analysis.db"),
+        progress=progress, on_group=on_group,
+    )
+    typer.echo(format_eval(result))
+    if fit:
+        base = [i for i in items if i.regime == "base"]
+        loso = fit_loso(base, "base", lam=lam)
+        typer.echo("\n" + format_fit_report(loso))
+        if write:
+            write_weights(config_dir() / "config.toml", loso.insample_weights, {})
+            typer.echo(f"wrote weights to {config_dir() / 'config.toml'}")
+
+
 if __name__ == "__main__":
     app()
 
