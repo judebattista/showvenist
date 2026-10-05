@@ -1,6 +1,7 @@
 """Command-line interface for showvenist."""
 
 import importlib.metadata
+import sys
 from pathlib import Path
 
 import typer
@@ -52,13 +53,9 @@ def _tmdb():
 
 
 def _pick(cands: list[dict]) -> int:
-    import sys
-
-    if not sys.stdin.isatty():
-        raise typer.BadParameter("ambiguous show; use --year or --tmdb-id")
     for i, c in enumerate(cands[:8], 1):
         typer.echo(f"  {i}. {c['title']} ({c['year']})  tmdb:{c['tmdb_id']}")
-    n = typer.prompt("Which one", type=int)
+    n = typer.prompt("Which one", type=typer.IntRange(1, min(len(cands), 8)))
     return cands[n - 1]["tmdb_id"]
 
 
@@ -69,9 +66,11 @@ def ingest(
     subs: Path | None = typer.Option(None, "--subs", help="Folder of reference .srt files"),
     year: int | None = typer.Option(None, "--year"),
     tmdb_id: int | None = typer.Option(None, "--tmdb-id"),
+    refresh: bool = typer.Option(False, "--refresh", help="Replace an existing bundle"),
     out: Path | None = typer.Option(None, "-o", help="Bundle root directory"),
 ) -> None:
     """Build a show's reference bundle and print its data-quality report."""
+    from showvenist.adapters.tmdb import TmdbError
     from showvenist.bundle.ingest import IngestError
     from showvenist.bundle.ingest import ingest as run_ingest
     from showvenist.bundle.quality import quality_report, render
@@ -79,9 +78,9 @@ def ingest(
     try:
         bundle, bdir, scan = run_ingest(
             _tmdb(), show, year=year, tmdb_id=tmdb_id, refs=tuple(ref), subs_dir=subs,
-            root=out, pick=_pick,
+            root=out, pick=_pick if sys.stdin.isatty() else None, refresh=refresh,
         )
-    except IngestError as e:
+    except (IngestError, TmdbError) as e:
         typer.echo(str(e), err=True)
         raise typer.Exit(1) from None
     typer.echo(f"Wrote {bdir / 'show.json'} ({len(bundle.episodes)} episodes, "
@@ -100,8 +99,10 @@ def bundle_check(
     """Print the bundle's data-quality report."""
     from showvenist.bundle.overrides import BundleError
     from showvenist.bundle.quality import quality_report, render
-    from showvenist.bundle.store import bundle_path, load_bundle
+    from showvenist.bundle.store import bundle_path, load_bundle, slugify
 
+    if not (bundle_path(show, root) / "show.json").exists():
+        show = slugify(show)  # accept a title as well as a slug
     try:
         bundle = load_bundle(show, root)
     except BundleError as e:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import statistics
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -29,7 +30,7 @@ class SeasonQuality:
     season: int
     episodes: int = 0
     synopsis_coverage: float = 0.0
-    mean_synopsis_words: float = 0.0
+    median_synopsis_words: float = 0.0
     guest_cast_coverage: float = 0.0
     crew_coverage: float = 0.0
     subtitle_coverage: float = 0.0
@@ -69,7 +70,7 @@ def _measure(label: int, eps: list[Episode], bundle_dir: Path | None) -> SeasonQ
     wc = [_words(e) for e in eps]
     withsyn = [w for w in wc if w > 0]
     q.synopsis_coverage = len(withsyn) / n
-    q.mean_synopsis_words = sum(withsyn) / len(withsyn) if withsyn else 0.0
+    q.median_synopsis_words = float(statistics.median(withsyn)) if withsyn else 0.0
     q.guest_cast_coverage = sum(_has_guest(e) for e in eps) / n
     q.crew_coverage = sum(bool(e.directors or e.writers) for e in eps) / n
     q.subtitle_coverage = sum(_sub_ok(e, bundle_dir) for e in eps) / n
@@ -156,7 +157,8 @@ def render(report: QualityReport) -> str:
         )
         return (
             f"{label}: {q.episodes} eps | synopsis {_pct(q.synopsis_coverage)} "
-            f"(mean {q.mean_synopsis_words:.0f} words) | guest cast {_pct(q.guest_cast_coverage)} "
+            f"(median {q.median_synopsis_words:.0f} words) | "
+            f"guest cast {_pct(q.guest_cast_coverage)} "
             f"| crew {_pct(q.crew_coverage)} | ref subs {_pct(q.subtitle_coverage)} | {rt}"
         )
 

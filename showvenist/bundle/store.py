@@ -42,8 +42,8 @@ def bundle_path(slug: str, root: Path | None = None) -> Path:
 
 def save_bundle(bundle: Bundle, root: Path | None = None) -> Path:
     """Write show.json atomically; returns its path. Revision is recomputed."""
-    bundle = bundle.with_revision()
     d = bundle_path(slugify(bundle.show.title, bundle.show.year), root)
+    bundle = bundle.with_revision(d)
     d.mkdir(parents=True, exist_ok=True)
     target = d / "show.json"
     text = json.dumps(bundle.model_dump(mode="json"), indent=2, sort_keys=True,
@@ -54,6 +54,7 @@ def save_bundle(bundle: Bundle, root: Path | None = None) -> Path:
             f.write(text)
             f.flush()
             os.fsync(f.fileno())
+        os.chmod(tmp, 0o644)
         os.replace(tmp, target)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)

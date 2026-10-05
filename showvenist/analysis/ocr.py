@@ -39,7 +39,7 @@ import pytesseract
 from PIL import Image
 
 from showvenist.analysis.types import Cue, SubtitleTrack
-from showvenist.bundle.schema import OCR_LANG_FOR
+from showvenist.bundle.schema import ocr_language
 
 TESS_CONFIG = "--psm 6"
 VOBSUB_UPSCALE = 3  # DVD subtitles are ~720x480; Tesseract wants taller glyphs
@@ -230,7 +230,7 @@ _OCR_FIXES = [
 
 def ocr_image(img: Image.Image, language: str = "en") -> str:
     """Tesseract one rendered subtitle image; returns trimmed non-empty lines."""
-    text = pytesseract.image_to_string(img, lang=OCR_LANG_FOR[language], config=TESS_CONFIG)
+    text = pytesseract.image_to_string(img, lang=ocr_language(language), config=TESS_CONFIG)
     for rx, rep in _OCR_FIXES:
         text = rx.sub(rep, text)
     return "\n".join(ln.strip() for ln in text.splitlines() if ln.strip())
@@ -371,7 +371,7 @@ def parse_wordlist(lines: Iterable[str]) -> frozenset[str]:
 @functools.lru_cache(maxsize=8)
 def dictionary(language: str) -> frozenset[str]:
     """Tesseract's word list for the language (see module docstring); empty if unavailable."""
-    lang = OCR_LANG_FOR.get(language, language)
+    lang = ocr_language(language)
     tessdata = _tessdata_dir()
     combine, dawg2 = shutil.which("combine_tessdata"), shutil.which("dawg2wordlist")
     if tessdata is None or combine is None or dawg2 is None:

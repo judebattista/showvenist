@@ -9,7 +9,7 @@ from pathlib import Path
 from showvenist.adapters import localsubs
 from showvenist.adapters.tmdb import TmdbAdapter
 from showvenist.bundle.schema import Bundle, PartialBundle
-from showvenist.bundle.store import bundle_path, save_bundle, slugify
+from showvenist.bundle.store import bundle_path, load_bundle, save_bundle, slugify
 
 _TMDB_URL = re.compile(r"themoviedb\.org/tv/(\d+)")
 _IMDB_URL = re.compile(r"imdb\.com/title/(tt\d+)")
@@ -74,6 +74,7 @@ def ingest(
     subs_dir: Path | None = None,
     root: Path | None = None,
     pick: Callable[[list[dict]], int] | None = None,
+    refresh: bool = False,
 ) -> tuple[Bundle, Path, localsubs.ScanReport | None]:
     tid = resolve_tmdb_id(tmdb, show, year, tmdb_id, refs, pick)
     partial = tmdb.fetch(tid)
@@ -86,6 +87,17 @@ def ingest(
         provenance=partial.provenance,
     )
     slug = slugify(bundle.show.title, bundle.show.year)
+    existing = bundle_path(slug, root) / "show.json"
+    if existing.exists():
+        if not refresh:
+            raise IngestError(
+                f"{existing} exists; bundles never update silently. Re-run with --refresh."
+            )
+        # carry reference subtitles forward: the files stay in subs/
+        old = {e.id: e for e in load_bundle(slug, root, apply_overrides=False).episodes}
+        for ep in bundle.episodes:
+            if ep.id in old:
+                ep.subtitles = list(old[ep.id].subtitles)
     report = None
     if subs_dir is not None:
         subs, report = localsubs.scan_folder(subs_dir, bundle)

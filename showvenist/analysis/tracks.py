@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from showvenist.analysis.types import SubtitleTrack
-from showvenist.bundle.schema import LANG_639_2
+from showvenist.bundle.schema import lang_codes
 
 
 def select_track(
@@ -15,7 +15,7 @@ def select_track(
     tracks (no OCR), then the lowest stream index.
     """
     lang = language.lower()
-    wanted = {lang, LANG_639_2.get(lang, lang)}
+    wanted = lang_codes(lang)
     cands = [
         t
         for t in tracks

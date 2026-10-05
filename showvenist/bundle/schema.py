@@ -4,17 +4,47 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 SCHEMA_VERSION = 1
 
-# Language vocabulary shared with analysis (M2): ISO 639-1 codes in the bundle ("en"),
-# mapped to Tesseract traineddata names by OCR_LANG_FOR. Subtitle track tags are ISO 639-2
-# ("eng"); analysis converts via LANG_639_2.
-LANG_639_2: dict[str, str] = {"en": "eng"}
-OCR_LANG_FOR: dict[str, str] = {"en": "eng"}
+# Language vocabulary shared with analysis (M2): the bundle stores ISO 639-1 ("en").
+# Subtitle track tags are ISO 639-2, which has bibliographic (B) and terminologic (T) variants.
+# value = (639-2/B, 639-2/T, Tesseract traineddata name)
+LANGUAGES: dict[str, tuple[str, str, str]] = {
+    "en": ("eng", "eng", "eng"), "fr": ("fre", "fra", "fra"), "de": ("ger", "deu", "deu"),
+    "es": ("spa", "spa", "spa"), "it": ("ita", "ita", "ita"), "pt": ("por", "por", "por"),
+    "nl": ("dut", "nld", "nld"), "sv": ("swe", "swe", "swe"), "da": ("dan", "dan", "dan"),
+    "no": ("nor", "nor", "nor"), "fi": ("fin", "fin", "fin"), "pl": ("pol", "pol", "pol"),
+    "ru": ("rus", "rus", "rus"), "ja": ("jpn", "jpn", "jpn"), "ko": ("kor", "kor", "kor"),
+    "zh": ("chi", "zho", "chi_sim"), "cs": ("cze", "ces", "ces"), "hu": ("hun", "hun", "hun"),
+    "tr": ("tur", "tur", "tur"), "el": ("gre", "ell", "ell"), "he": ("heb", "heb", "heb"),
+}
+
+
+def lang_codes(lang: str) -> set[str]:
+    """Every tag a subtitle track may carry for a bundle language (639-1, 639-2/B and /T)."""
+    b, t, _ = LANGUAGES.get(lang, (lang, lang, lang))
+    return {lang, b, t}
+
+
+def ocr_language(lang: str) -> str:
+    """Tesseract traineddata name for a bundle language."""
+    try:
+        return LANGUAGES[lang][2]
+    except KeyError:
+        raise ValueError(f"unsupported language {lang!r}") from None
+
+
+def to_639_1(code: str) -> str | None:
+    code = code.lower()
+    for l1, (b, t, _) in LANGUAGES.items():
+        if code in (l1, b, t):
+            return l1
+    return None
 
 
 class _Model(BaseModel):
@@ -109,14 +139,29 @@ class Bundle(_Model):
     def episode_by_id(self) -> dict[str, Episode]:
         return {e.id: e for e in self.episodes}
 
-    def compute_revision(self) -> str:
-        """Content hash over everything except bundle_revision and provenance timestamps."""
+    def compute_revision(self, bundle_dir: Path | None = None) -> str:
+        """Content hash over everything except bundle_revision and provenance.
+
+        With `bundle_dir`, the content of each referenced subtitle file is hashed too, so a
+        corrected reference .srt at the same path gives a new revision.
+        """
         data = self.model_dump(mode="json", exclude={"bundle_revision", "provenance"})
+        if bundle_dir is not None:
+            files = {
+                s.path: hashlib.blake2b(
+                    (bundle_dir / s.path).read_bytes(), digest_size=16
+                ).hexdigest()
+                for e in self.episodes
+                for s in e.subtitles
+                if (bundle_dir / s.path).is_file()
+            }
+            if files:  # bundles without reference subtitles keep their plain content hash
+                data["subtitle_files"] = files
         blob = json.dumps(data, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
         return "b3:" + hashlib.blake2b(blob.encode(), digest_size=16).hexdigest()
 
-    def with_revision(self) -> Bundle:
-        return self.model_copy(update={"bundle_revision": self.compute_revision()})
+    def with_revision(self, bundle_dir: Path | None = None) -> Bundle:
+        return self.model_copy(update={"bundle_revision": self.compute_revision(bundle_dir)})
 
 
 class PartialBundle(_Model):

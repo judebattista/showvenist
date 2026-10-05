@@ -48,7 +48,7 @@ def _bundle() -> Bundle:
 def test_report(tmp_path: Path):
     r = quality_report(_bundle(), tmp_path)
     s1, s2 = r.seasons
-    assert s1.synopsis_coverage == 1.0 and s1.mean_synopsis_words == 12
+    assert s1.synopsis_coverage == 1.0 and s1.median_synopsis_words == 12
     assert s1.guest_cast_coverage == 0.5 and s1.crew_coverage == 0.5
     assert s1.subtitle_coverage == 0.0  # file missing on disk
     assert s2.episodes == 1 and s2.synopsis_coverage == 0

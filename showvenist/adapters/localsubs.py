@@ -7,7 +7,7 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from showvenist.bundle.schema import Bundle, Episode, PartialBundle, SubtitleRef
+from showvenist.bundle.schema import Bundle, Episode, PartialBundle, SubtitleRef, to_639_1
 
 _SXXEYY = re.compile(r"(?<![0-9a-z])s(\d{1,3})[ ._-]?e(\d{1,4})(?![0-9])", re.I)
 _NXM = re.compile(r"(?<![0-9a-z])(\d{1,2})x(\d{1,3})(?![0-9a-z])", re.I)
@@ -48,7 +48,7 @@ def scan_folder(
             continue
         stem = f.name[: -len(".srt")]
         m = _LANG_SUFFIX.search(stem)
-        file_lang = m.group(1).lower() if m else None
+        file_lang = to_639_1(m.group(1)) if m else None
         found.setdefault(eid, []).append((f, file_lang or default_lang))
     episodes: list[Episode] = []
     for eid, files in found.items():

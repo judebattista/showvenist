@@ -15,6 +15,7 @@ from showvenist.bundle.schema import (
     Episode,
     Ordering,
     OrderingEntry,
+    SubtitleRef,
     Synopsis,
 )
 
@@ -34,7 +35,8 @@ class BundleError(Exception):
 _SCALARS = {"title", "air_date", "excluded", "runtime_min", "production_code"}
 _REPLACE_LISTS = {"directors", "writers"}
 _ADD_LISTS = {"alt_titles", "synopses", "guest_cast"}
-_FIELDS = _SCALARS | _REPLACE_LISTS | _ADD_LISTS
+_REPLACE_MODELS = {"subtitles"}  # replace semantics; an empty list removes the references
+_FIELDS = _SCALARS | _REPLACE_LISTS | _ADD_LISTS | _REPLACE_MODELS
 _ORDERING_SOURCE = "overrides"
 _ORDERING_TYPE = "custom"
 
@@ -89,6 +91,8 @@ def apply_overrides(bundle: Bundle, path: Path) -> Bundle:
     ep_nodes = _map(top["episodes"][1]) if "episodes" in top else {}
     for ep_id, fields in (ep_section or {}).items():
         ep_id = str(ep_id)
+        if ep_id not in ep_nodes:
+            raise BundleError(path, f"unsupported episode key {ep_id!r} (quote it)", None)
         knode, vnode = ep_nodes[ep_id]
         if ep_id not in episodes:
             _warn_vanished(path, ep_id, knode)
@@ -106,7 +110,12 @@ def apply_overrides(bundle: Bundle, path: Path) -> Bundle:
     ord_nodes = _map(top["orderings"][1]) if "orderings" in top else {}
     for name, entries in (ord_section or {}).items():
         name = str(name)
+        if name not in ord_nodes:
+            raise BundleError(path, f"unsupported ordering key {name!r} (quote it)", None)
         knode, vnode = ord_nodes[name]
+        if name in bundle.orderings and bundle.orderings[name].source != _ORDERING_SOURCE:
+            raise BundleError(path, f"ordering {name!r} already exists in the bundle; "
+                              "pick another name", _line(knode))
         if not isinstance(entries, list):
             raise BundleError(path, f"ordering {name!r} must be a list of entries", _line(vnode))
         parsed = []
@@ -127,7 +136,7 @@ def apply_overrides(bundle: Bundle, path: Path) -> Bundle:
             "orderings": orderings,
         }
     )
-    return merged.with_revision()
+    return merged.with_revision(path.parent)
 
 
 def _verr(e: ValidationError) -> str:
@@ -141,13 +150,15 @@ def _apply_episode(ep: Episode, fields: dict, nodes: dict, path: Path) -> Episod
     update: dict[str, Any] = {}
     for name, value in fields.items():
         name = str(name)
+        if name not in nodes:
+            raise BundleError(path, f"unsupported key {name!r} (quote YAML keys)", None)
         knode, vnode = nodes[name]
         if name not in _FIELDS:
             raise BundleError(path, f"unknown field {name!r} for episode {ep.id}", _line(knode))
         try:
             if name in _SCALARS:
-                Episode.model_validate({**ep.model_dump(), name: value})
-                update[name] = value
+                checked = Episode.model_validate({**ep.model_dump(), name: value})
+                update[name] = getattr(checked, name)
             elif name in _REPLACE_LISTS or name == "alt_titles":
                 if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
                     raise BundleError(path, f"{name} must be a list of strings", _line(vnode))
@@ -155,6 +166,10 @@ def _apply_episode(ep: Episode, fields: dict, nodes: dict, path: Path) -> Episod
                     update[name] = ep.alt_titles + [v for v in value if v not in ep.alt_titles]
                 else:
                     update[name] = list(value)
+            elif name in _REPLACE_MODELS:
+                if not isinstance(value, list):
+                    raise BundleError(path, f"{name} must be a list", _line(vnode))
+                update[name] = [SubtitleRef.model_validate(v) for v in value]
             else:
                 if not isinstance(value, list):
                     raise BundleError(path, f"{name} must be a list", _line(vnode))
