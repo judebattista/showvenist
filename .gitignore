@@ -1,3 +1,4 @@
 data/
 *.sw[a-p]
-
+spike/out/
+__pycache__/
