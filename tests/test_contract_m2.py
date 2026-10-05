@@ -14,5 +14,5 @@ def test_cache_roundtrip_and_version_invalidation(tmp_path, monkeypatch):
     p = params_hash(start=0)
     c.put("fp", "ocr", p, "{}")
     assert c.get("fp", "ocr", p) == "{}"
-    monkeypatch.setitem(types.EXTRACTOR_VERSIONS, "ocr", 2)
+    monkeypatch.setitem(types.EXTRACTOR_VERSIONS, "ocr", types.EXTRACTOR_VERSIONS["ocr"] + 1)
     assert c.get("fp", "ocr", p) is None

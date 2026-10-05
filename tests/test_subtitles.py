@@ -14,15 +14,30 @@ from tests.test_probe import make_mkv
         ("(laughing) What?!", "what"),
         ("JOHN: Don't go.", "dont go"),
         ("<i>It's</i> {\\an8}fine, ok?", "its fine ok"),
-        ("Caldwell: Sir.\nSAM: Yes.", "sir yes"),
+        # Mixed-case "Name:" is dialogue unless the line is otherwise all caps (CC style).
+        ("Caldwell: Sir.\nSAM: Yes.", "caldwell sir yes"),
+        ("Caldwell: SIR.\nSAM: YES.", "sir yes"),
+        ("CENTAURI 1:\nJump point forming.", "jump point forming"),
+        ("Look: we go now.", "look we go now"),
+        ("- Listen: he's gone.", "listen hes gone"),
         ("'Tis the rock 'n' roll", "tis the rock n roll"),
         ("It’s   a\n\ttest", "its a test"),
         ("Time is 10:30.", "time is 10 30"),
-        ("[unterminated", ""),
+        # A stray bracket isn't an annotation: only its punctuation goes (review fix).
+        ("[unterminated", "unterminated"),
+        ("I (think we should go now, Mal.", "i think we should go now mal"),
+        ("[DOOR SLAMS]\n(laughing) Hi.", "hi"),
+        # Annotations don't span lines or run on for a whole cue.
+        ("(" + "x" * 80 + ") go", "x" * 80 + " go"),
     ],
 )
 def test_normalize(raw, want):
     assert normalize(raw) == want
+
+
+def test_normalize_stray_bracket_keeps_next_line():
+    assert normalize("[door slams\nWe go now").endswith("we go now")
+    assert "we go now" in normalize("(sighs\nWe go now)")
 
 
 def test_read_text_cues_ass(tmp_path: Path):

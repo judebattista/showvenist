@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 from showvenist.analysis.ocr import ocr_cues, ocr_quality
 from showvenist.analysis.probe import probe
-from showvenist.analysis.subtitles import read_text_cues
-from showvenist.analysis.tracks import select_track
+from showvenist.analysis.subtitles import normalize, read_text_cues
+from showvenist.analysis.tracks import cue_count, rank_tracks
 from showvenist.analysis.types import (
+    EXTRACTOR_VERSIONS,
     AnalysisCache,
     Cue,
     Dialogue,
+    MediaProbe,
+    SubtitleReadError,
     SubtitleTrack,
     Window,
     params_hash,
@@ -21,13 +25,22 @@ from showvenist.config import AnalysisConfig
 from showvenist.state.fingerprint import fingerprint
 
 CHUNK_S = 60.0
+# Below this many stage-2 lines, a track picked without a known event count is suspect (an
+# untagged forced or near-empty track): the next unknown-count candidate is tried.
+MIN_UNKNOWN_TRACK_LINES = 10
 
 
 def window_spans(
-    duration_s: float, fractions=(0.2, 0.5, 0.8), max_s: float = 300.0
+    duration_s: float | None, fractions=(0.2, 0.5, 0.8), max_s: float = 300.0
 ) -> list[tuple[float, float]]:
-    """Seed spans (start, upper-bound end) for the sampled windows."""
-    return [(duration_s * f, min(duration_s, duration_s * f + max_s)) for f in fractions]
+    """Seed spans (start, upper-bound end) for the sampled windows. Each window stops at the
+    next one's start so short files don't read the same stretch twice. With no known duration
+    (0 or None) there is nothing to sample: one span covering the whole track (a full read)."""
+    if not duration_s or duration_s <= 0:
+        return [(0.0, math.inf)]
+    starts = [duration_s * f for f in fractions]
+    ends = [*starts[1:], duration_s]
+    return [(a, min(duration_s, a + max_s, b)) for a, b in zip(starts, ends, strict=True)]
 
 
 def _window_json(w: Window, read_to: float) -> str:
@@ -47,6 +60,12 @@ def _window_load(payload: str) -> tuple[Window, float]:
     return w, d["read_to"]
 
 
+def _cue_key(c: Cue) -> tuple[float, str]:
+    """Identity of a cue across chunk and window edges: OCR of the same event read twice may
+    differ in end time (fallback length) and trivially in text."""
+    return round(c.start_s, 1), normalize(c.text)
+
+
 def _read(path: Path, track: SubtitleTrack, a: float, b: float, language: str, cfg) -> list[Cue]:
     if track.kind == "text":
         return read_text_cues(path, track, a, b)
@@ -56,22 +75,33 @@ def _read(path: Path, track: SubtitleTrack, a: float, b: float, language: str, c
 def _read_window(
     path, track, start, limit, language, cfg, min_lines, chunk=CHUNK_S
 ) -> tuple[Window, float]:
-    """Read from start in chunks until min_lines (0 = never stop early) or limit."""
-    seen: set[tuple[float, float, str]] = set()
+    """Read from start in chunks until min_lines (0 = never stop early) or limit. A read error
+    ends the window early: it keeps the cues read so far and records the error."""
+    seen: set[tuple[float, str]] = set()
     cues: list[Cue] = []
+    error: str | None = None
+
+    def add(batch: list[Cue]) -> None:
+        for c in batch:
+            k = _cue_key(c)
+            if k not in seen:
+                seen.add(k)
+                cues.append(c)
+
     pos = start
     while pos < limit:
         nxt = min(pos + chunk, limit)
-        for c in _read(path, track, pos, nxt, language, cfg):
-            key = (c.start_s, c.end_s, c.text)
-            if key not in seen:
-                seen.add(key)
-                cues.append(c)
+        try:
+            add(_read(path, track, pos, nxt, language, cfg))
+        except SubtitleReadError as e:
+            add(e.cues)
+            error = str(e) or type(e).__name__
+            break
         pos = nxt
         if min_lines and len(cues) >= min_lines:
             break
     end = max((c.end_s for c in cues), default=start)
-    return Window(start, end, cues), pos
+    return Window(start, end, cues, error=error), pos
 
 
 def _cached_window(cache, fp, key, compute) -> tuple[Window, float]:
@@ -80,9 +110,49 @@ def _cached_window(cache, fp, key, compute) -> tuple[Window, float]:
         if hit is not None:
             return _window_load(hit)
     w, read_to = compute()
-    if cache is not None:
+    if cache is not None and w.error is None:  # a failed read is retried next run
         cache.put(fp, "window", key, _window_json(w, read_to))
     return w, read_to
+
+
+def _extractor_version(track: SubtitleTrack) -> int:
+    """Window payloads are produced by the text or OCR extractor: their version is part of the
+    window key, so bumping either re-reads."""
+    return EXTRACTOR_VERSIONS["text" if track.kind == "text" else "ocr"]
+
+
+def _sample_windows(path, fp, track, dur, language, cfg, cache) -> list[tuple[Window, float]]:
+    max_s = cfg.window_max_minutes * 60.0
+    unknown_dur = not dur or dur <= 0
+    wins: list[tuple[Window, float]] = []
+    for start, limit in window_spans(dur, max_s=max_s):
+        key = params_hash(
+            track=track.index,
+            start_s=start,
+            limit=limit,
+            language=language,
+            min_lines=cfg.window_min_lines,
+            max_minutes=cfg.window_max_minutes,
+            extractor=_extractor_version(track),
+        )
+        wins.append(
+            _cached_window(
+                cache,
+                fp,
+                key,
+                lambda s=start, e=limit: _read_window(
+                    path,
+                    track,
+                    s,
+                    e,
+                    language,
+                    cfg,
+                    0 if unknown_dur else cfg.window_min_lines,
+                    chunk=math.inf if unknown_dur else CHUNK_S,
+                ),
+            )
+        )
+    return wins
 
 
 def extract_dialogue(
@@ -92,37 +162,43 @@ def extract_dialogue(
     cfg: AnalysisConfig,
     cache: AnalysisCache | None = None,
     full: bool = False,
+    probe_result: MediaProbe | None = None,
 ) -> Dialogue:
+    """Stage 2 (sampled windows) or, with `full`, stage 3. `probe_result` saves re-probing when
+    the caller already has it; otherwise the probe goes through `cache`."""
     path = Path(path)
-    info = probe(path)
+    info = probe_result if probe_result is not None else probe(path, cache)
     fp = fingerprint(path)
-    track = select_track(info.subtitle_tracks, language)
-    if track is None:
+    ranked = rank_tracks(info.subtitle_tracks, language)
+    if not ranked:
         return Dialogue(track=None, full=full)
 
-    max_s = cfg.window_max_minutes * 60.0
     dur = info.duration_s
-    wins: list[tuple[Window, float]] = []
-    for start, _ in window_spans(dur, max_s=max_s):
-        key = params_hash(
-            track=track.index,
-            start_s=start,
-            language=language,
-            min_lines=cfg.window_min_lines,
-            max_minutes=cfg.window_max_minutes,
+    notes: list[str] = []
+    track = ranked[0]
+    wins = _sample_windows(path, fp, track, dur, language, cfg, cache)
+    if cue_count(track) is None:
+        # No frame-count tags: the pick is by stream order, so check it with the stage-2 lines
+        # and fall back to the next unknown-count track while it reads almost nothing.
+        others = [t for t in ranked[1:] if cue_count(t) is None]
+        best = (track, wins)
+        for alt in others:
+            if sum(w.lines for w, _ in best[1]) >= MIN_UNKNOWN_TRACK_LINES:
+                break
+            alt_wins = _sample_windows(path, fp, alt, dur, language, cfg, cache)
+            if sum(w.lines for w, _ in alt_wins) > sum(w.lines for w, _ in best[1]):
+                best = (alt, alt_wins)
+        track, wins = best
+        notes.append(
+            f"track #{track.index} picked without an event count"
+            + (f" (of {len(others) + 1} candidates)" if others else "")
         )
-        wins.append(
-            _cached_window(
-                cache,
-                fp,
-                key,
-                lambda s=start: _read_window(
-                    path, track, s, min(dur, s + max_s), language, cfg, cfg.window_min_lines
-                ),
-            )
-        )
+    if not dur or dur <= 0:
+        notes.append("duration unknown: read the whole track instead of sampling")
+        full = True
 
-    if full:
+    max_s = cfg.window_max_minutes * 60.0
+    if full and dur and dur > 0:
         # Gaps of [0, dur] not already covered by a sample window, read in chunks.
         covered = sorted((w.start_s, rt) for w, rt in wins)
         gaps: list[tuple[float, float]] = []
@@ -137,7 +213,13 @@ def extract_dialogue(
             s = ga
             while s < gb:
                 e = min(gb, s + max_s)
-                key = params_hash(track=track.index, start_s=s, language=language, full=e)
+                key = params_hash(
+                    track=track.index,
+                    start_s=s,
+                    language=language,
+                    full=e,
+                    extractor=_extractor_version(track),
+                )
                 wins.append(
                     _cached_window(
                         cache,
@@ -151,19 +233,26 @@ def extract_dialogue(
                 s = e
 
     windows = sorted((w for w, _ in wins), key=lambda w: w.start_s)
-    if full:  # cues straddling window edges would otherwise appear twice
-        seen: set[tuple[float, float, str]] = set()
-        for w in windows:
-            kept = []
-            for c in w.cues:
-                k = (c.start_s, c.end_s, c.text)
-                if k not in seen:
-                    seen.add(k)
-                    kept.append(c)
-            w.cues = kept
+    # Cues straddling window edges (and overlapping windows) would otherwise count twice.
+    seen: set[tuple[float, str]] = set()
+    for w in windows:
+        kept = []
+        for c in w.cues:
+            k = _cue_key(c)
+            if k not in seen:
+                seen.add(k)
+                kept.append(c)
+        w.cues = kept
+    notes += [f"window at {w.start_s:.1f} s: read failed: {w.error}" for w in windows if w.error]
 
     if track.kind == "text":
         quality: float | None = 1.0
     else:
         quality = ocr_quality([c.text for w in windows for c in w.cues], vocabulary, language)
-    return Dialogue(track=track, windows=windows, ocr_quality=quality, full=full)
+    return Dialogue(
+        track=track,
+        windows=windows,
+        ocr_quality=quality,
+        full=full,
+        note="; ".join(notes) or None,
+    )

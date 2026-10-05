@@ -7,7 +7,7 @@ from pathlib import Path
 
 import av
 
-from showvenist.analysis.types import Cue, SubtitleTrack
+from showvenist.analysis.types import Cue, SubtitleReadError, SubtitleTrack
 
 DEFAULT_CUE_S = 2.0
 
@@ -39,33 +39,44 @@ def _packet_text(codec: str, data: bytes) -> str:
 
 def read_text_cues(path: Path, track: SubtitleTrack, start_s: float, end_s: float) -> list[Cue]:
     """Cues of a text track overlapping [start_s, end_s], in time order. Seeks, then demuxes
-    only the subtitle stream; no OCR."""
+    only the subtitle stream; no OCR. Raises SubtitleReadError (with the cues read so far) when
+    the file can't be opened, seeked or demuxed."""
     cues: list[Cue] = []
-    with av.open(str(path)) as c:
-        stream = c.streams[track.index]
-        if start_s > 0:
-            c.seek(int(start_s * av.time_base), backward=True, any_frame=False)
-        for pkt in c.demux(stream):
-            if pkt.pts is None or not pkt.size:
-                continue
-            t0 = float(pkt.pts * pkt.time_base)
-            if t0 > end_s:
-                break
-            dur = float(pkt.duration * pkt.time_base) if pkt.duration else DEFAULT_CUE_S
-            if t0 + dur < start_s:
-                continue
-            text = _packet_text(track.codec, bytes(pkt))
-            if text:
-                cues.append(Cue(t0, t0 + dur, text))
+    try:
+        with av.open(str(path)) as c:
+            stream = c.streams[track.index]
+            if start_s > 0:
+                c.seek(int(start_s * av.time_base), backward=True, any_frame=False)
+            for pkt in c.demux(stream):
+                if pkt.pts is None or not pkt.size:
+                    continue
+                t0 = float(pkt.pts * pkt.time_base)
+                if t0 > end_s:
+                    break
+                dur = float(pkt.duration * pkt.time_base) if pkt.duration else DEFAULT_CUE_S
+                if t0 + dur < start_s:
+                    continue
+                text = _packet_text(track.codec, bytes(pkt))
+                if text:
+                    cues.append(Cue(t0, t0 + dur, text))
+    except (av.error.FFmpegError, OSError) as e:
+        cues.sort(key=lambda q: q.start_s)
+        raise SubtitleReadError(f"{type(e).__name__}: {e}", cues) from e
     cues.sort(key=lambda q: q.start_s)
     return cues
 
 
 _MARKUP = re.compile(r"<[^>]*>|\{[^}]*\}")
-_SDH = re.compile(r"\[[^\]]*\]?|\([^)]*\)?")
-# Speaker labels: "JOHN:" in mixed-case tracks, "Caldwell:" in all-caps (CC-style) tracks.
+# SDH annotations: closed on the same line and short. A stray opener ("I (think we...") is not
+# an annotation; punctuation stripping drops just the bracket.
+_SDH = re.compile(r"\[[^\]\n]{0,60}\]|\([^)\n]{0,60}\)")
+# Speaker labels at line start: ALL-CAPS ("JOHN:", "CENTAURI 1:") anywhere; a capitalized name
+# ("Caldwell:") only on an otherwise all-caps line (CC-style tracks), so dialogue such as
+# "Look: we go now" keeps its first word.
 _SPEAKER = re.compile(
-    r"^\s*-?\s*(?:[A-Z][A-Z0-9 .'#-]{1,30}|[A-Z][a-z]+(?: [A-Z][a-z]+)?):(?!\d)\s*", re.M
+    r"^[ \t]*-?[ \t]*(?:[A-Z][A-Z0-9 .'#-]{1,30}:(?!\d)"
+    r"|[A-Z][a-z]+(?: [A-Z][a-z]+)?:(?!\d)(?=[^a-z\n]*$))[ \t]*",
+    re.M,
 )
 _PUNCT = re.compile(r"[^\w\s']|_")
 _APOS = re.compile(r"(?<!\w)'|'(?!\w)")

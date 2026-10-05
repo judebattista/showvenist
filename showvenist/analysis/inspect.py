@@ -19,8 +19,8 @@ def inspect_file(
     cache: AnalysisCache | None = None,
 ) -> str:
     path = Path(path)
-    info = probe(path)
-    d = extract_dialogue(path, language, vocabulary, cfg, cache)
+    info = probe(path, cache)
+    d = extract_dialogue(path, language, vocabulary, cfg, cache, probe_result=info)
     out = [
         f"file:         {path}",
         f"duration:     {info.duration_s:.1f} s ({info.duration_s / 60:.1f} min)",
@@ -34,15 +34,19 @@ def inspect_file(
         mark = "*" if d.track is not None and t.index == d.track.index else " "
         flags = " forced" if t.forced else ""
         flags += " sdh" if t.sdh else ""
+        events = "?" if t.events < 0 else str(t.events)
         out.append(
-            f" {mark} #{t.index} {t.codec} ({t.kind}) lang={t.lang or '-'} events={t.events}{flags}"
+            f" {mark} #{t.index} {t.codec} ({t.kind}) lang={t.lang or '-'} events={events}{flags}"
         )
     if d.track is None:
         out.append(f"no usable '{language}' subtitle track: dialogue scorers not available")
         return "\n".join(out) + "\n"
+    if d.note:
+        out.append(f"note:         {d.note}")
     out.append("windows:")
     for w in d.windows:
-        out.append(f"  {w.start_s:8.1f} - {w.end_s:8.1f} s: {w.lines} lines")
+        err = f" (read failed: {w.error})" if w.error else ""
+        out.append(f"  {w.start_s:8.1f} - {w.end_s:8.1f} s: {w.lines} lines{err}")
     q = d.ocr_quality
     out.append(f"ocr quality:  {'n/a' if q is None else f'{q:.2f}'}")
     out.append("first cues:")

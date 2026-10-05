@@ -35,3 +35,24 @@ def test_tie_prefers_text_and_unreadable_dropped():
         T(3, "eia_608", "eng", events=5000),
     ]
     assert select_track(ts, "en").index == 2
+
+
+def test_pgs_packets_count_double():
+    """Review fix: a PGS cue is two packets (show + clear), so equal cues means text wins."""
+    pgs = T(1, "hdmv_pgs_subtitle", "eng", events=800)
+    text = T(2, "subrip", "eng", events=400)
+    assert select_track([pgs, text], "en") is text
+    assert select_track([pgs, T(3, "subrip", "eng", events=300)], "en") is pgs
+    assert select_track([T(1, "hdmv_pgs_subtitle", "eng", events=60)], "en") is None  # 30 cues
+
+
+def test_unknown_counts_are_eligible_after_known():
+    from showvenist.analysis.tracks import rank_tracks
+
+    unk_sdh = T(1, "subrip", "eng", sdh=True, events=-1)
+    unk = T(2, "mov_text", "eng", events=-1)
+    unk_forced = T(3, "subrip", "eng", forced=True, events=-1)
+    known = T(4, "subrip", "eng", events=500)
+    assert select_track([unk_sdh, unk, unk_forced], "en") is unk  # non-SDH first
+    assert rank_tracks([unk_sdh, unk, unk_forced, known], "en") == [known, unk, unk_sdh]
+    assert select_track([T(1, "subrip", "fre", events=-1)], "en") is None

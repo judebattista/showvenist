@@ -38,8 +38,12 @@ import numpy as np
 import pytesseract
 from PIL import Image
 
-from showvenist.analysis.types import Cue, SubtitleTrack
+from showvenist.analysis.types import Cue, SubtitleReadError, SubtitleTrack
 from showvenist.bundle.schema import ocr_language
+
+# One tesseract subprocess per pool thread already uses every core; OpenMP threads inside each
+# would oversubscribe the CPU. pytesseract's subprocesses inherit this environment.
+os.environ.setdefault("OMP_THREAD_LIMIT", "1")
 
 TESS_CONFIG = "--psm 6"
 VOBSUB_UPSCALE = 3  # DVD subtitles are ~720x480; Tesseract wants taller glyphs
@@ -260,41 +264,55 @@ def _decode_events(path: Path, track: SubtitleTrack, start_s: float, end_s: floa
         raise ValueError(f"not a bitmap subtitle track: {track.codec}")
     upscale = VOBSUB_UPSCALE if kind == "vobsub" else 1
     events: list[_Event] = []
-    with av.open(str(path)) as c:
-        stream = c.streams[track.index]
-        pal: PgsPalette | VobPalette = (
-            PgsPalette() if kind == "pgs" else VobPalette(stream.codec_context.extradata)
-        )
-        if start_s > 0:
-            c.seek(int(start_s * av.time_base), backward=True, any_frame=False)
-            try:
-                stream.codec_context.flush_buffers()
-            except Exception:
-                pass
-        for pkt in c.demux(stream):
-            if pkt.pts is None:
-                continue
-            t = float(pkt.pts * pkt.time_base)
-            if t > end_s:
-                break
-            # Any packet (an empty PGS clear included) ends the cue on screen before it.
-            if events and (events[-1].end_s is None or events[-1].end_s > t):
-                events[-1].end_s = max(t, events[-1].start_s)
-            data = bytes(pkt)
-            pal.feed(data)  # palette state must see packets before the window too
-            try:
-                rects = pkt.decode()
-            except av.error.FFmpegError:
-                continue
-            if t < start_s:
-                continue
-            bitmaps = [b for b in map(bitmap_from_av, rects) if b is not None]
-            img = render(bitmaps, pal.lut(), upscale)
-            if img is None:
-                continue
-            dur = float(pkt.duration * pkt.time_base) if pkt.duration else 0.0
-            events.append(_Event(t, t + dur if dur > 0 else None, img))
+    try:
+        with av.open(str(path)) as c:
+            stream = c.streams[track.index]
+            pal: PgsPalette | VobPalette = (
+                PgsPalette() if kind == "pgs" else VobPalette(stream.codec_context.extradata)
+            )
+            if start_s > 0:
+                c.seek(int(start_s * av.time_base), backward=True, any_frame=False)
+                try:
+                    stream.codec_context.flush_buffers()
+                except Exception:
+                    pass
+            for pkt in c.demux(stream):
+                if pkt.pts is None:
+                    continue
+                t = float(pkt.pts * pkt.time_base)
+                # Any packet (an empty PGS clear included) ends the cue on screen before it,
+                # including the first packet past the window: close it before stopping.
+                if events and (events[-1].end_s is None or events[-1].end_s > t):
+                    events[-1].end_s = max(t, events[-1].start_s)
+                if t > end_s:
+                    break
+                data = bytes(pkt)
+                pal.feed(data)  # palette state must see packets before the window too
+                try:
+                    rects = pkt.decode()
+                except av.error.FFmpegError:
+                    continue
+                if t < start_s:
+                    continue
+                # After a mid-file seek a PGS display set may reuse a palette defined before
+                # the seek point; without it lut() is an identity ramp and renders garbage.
+                if isinstance(pal, PgsPalette) and not pal.pals:
+                    continue
+                bitmaps = [b for b in map(bitmap_from_av, rects) if b is not None]
+                img = render(bitmaps, pal.lut(), upscale)
+                if img is None:
+                    continue
+                dur = float(pkt.duration * pkt.time_base) if pkt.duration else 0.0
+                events.append(_Event(t, t + dur if dur > 0 else None, img))
+    except (av.error.FFmpegError, OSError) as e:
+        raise _DecodeError(f"{type(e).__name__}: {e}", events) from e
     return events
+
+
+class _DecodeError(Exception):
+    def __init__(self, message: str, events: list[_Event]):
+        super().__init__(message)
+        self.events = events
 
 
 def ocr_cues(
@@ -306,8 +324,17 @@ def ocr_cues(
     workers: int = 0,
 ) -> list[Cue]:
     """OCR the bitmap subtitle cues starting in [start_s, end_s]. Text is unnormalized;
-    consecutive identical cues (PGS re-sends an epoch) are merged; empty OCR results dropped."""
-    events = _decode_events(Path(path), track, start_s, end_s)
+    consecutive identical cues (PGS re-sends an epoch) are merged; empty OCR results dropped.
+    Raises SubtitleReadError (with the cues OCR'd before the failure) when the file can't be
+    opened, seeked or demuxed."""
+    try:
+        events = _decode_events(Path(path), track, start_s, end_s)
+    except _DecodeError as e:
+        raise SubtitleReadError(str(e), _events_to_cues(e.events, language, workers)) from e
+    return _events_to_cues(events, language, workers)
+
+
+def _events_to_cues(events: list[_Event], language: str, workers: int) -> list[Cue]:
     texts = ocr_images([e.image for e in events], language, workers)
     cues: list[Cue] = []
     for ev, text in zip(events, texts, strict=True):

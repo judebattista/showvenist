@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+import dataclasses
+import json
 import re
 from pathlib import Path
 
 import av
 
-from showvenist.analysis.types import MediaProbe, SubtitleTrack
+from showvenist.analysis.types import (
+    UNKNOWN_EVENTS,
+    AnalysisCache,
+    MediaProbe,
+    SubtitleTrack,
+    params_hash,
+)
+from showvenist.state.fingerprint import fingerprint
 
 # PyAV reports decoder names; map to ffprobe's codec names.
 CODEC_ALIASES = {"pgssub": "hdmv_pgs_subtitle", "dvdsub": "dvd_subtitle", "cc_dec": "eia_608"}
@@ -35,8 +44,34 @@ def _container_name(fmt: str) -> str:
     return fmt.split(",")[0]
 
 
-def probe(path: Path) -> MediaProbe:
+def _probe_json(p: MediaProbe) -> str:
+    return json.dumps(dataclasses.asdict(p))
+
+
+def _probe_load(payload: str) -> MediaProbe:
+    d = json.loads(payload)
+    d["subtitle_tracks"] = [SubtitleTrack(**t) for t in d["subtitle_tracks"]]
+    return MediaProbe(**d)
+
+
+def probe(path: Path, cache: AnalysisCache | None = None) -> MediaProbe:
+    """Header-only probe (stage 1). Never demuxes: a subtitle track without a
+    NUMBER_OF_FRAMES tag (MP4, ffmpeg/HandBrake MKVs) gets events = UNKNOWN_EVENTS, since
+    counting its packets would read the whole file. Cached by fingerprint when `cache` is given."""
     path = Path(path)
+    if cache is None:
+        return _probe(path)
+    fp = fingerprint(path)
+    key = params_hash()
+    hit = cache.get(fp, "probe", key)
+    if hit is not None:
+        return _probe_load(hit)
+    result = _probe(path)
+    cache.put(fp, "probe", key, _probe_json(result))
+    return result
+
+
+def _probe(path: Path) -> MediaProbe:
     with av.open(str(path)) as c:
         duration = c.duration / av.time_base if c.duration else 0.0
         chapters = c.chapters
@@ -44,19 +79,9 @@ def probe(path: Path) -> MediaProbe:
         video = next((s for s in c.streams if s.type == "video"), None)
         subs = [s for s in c.streams if s.type == "subtitle"]
         counts: dict[int, int] = {}
-        need = []
         for s in subs:
             nf = _tag(s.metadata, "NUMBER_OF_FRAMES")
-            if nf and nf.strip().isdigit():
-                counts[s.index] = int(nf)
-            else:
-                need.append(s)
-        if need:
-            for s in need:
-                counts[s.index] = 0
-            for pkt in c.demux(need):
-                if pkt.size:
-                    counts[pkt.stream.index] += 1
+            counts[s.index] = int(nf) if nf and nf.strip().isdigit() else UNKNOWN_EVENTS
         tracks = []
         for s in subs:
             title = _tag(s.metadata, "title") or ""
