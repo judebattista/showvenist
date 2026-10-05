@@ -1,0 +1,1 @@
+"""Sidecar file handling."""

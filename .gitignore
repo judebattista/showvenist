@@ -2,6 +2,7 @@ data/
 *.sw[a-p]
 spike/out/
 __pycache__/
+.venv/
 
 # Beads / Dolt files (added by bd init)
 .dolt/

@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "showvenist"
+version = "0.1.0"
+description = "Identifies the season and episode of TV disc rips against a reference bundle for the show"
+requires-python = ">=3.11"
+
+dependencies = [
+    "httpx",
+    "pydantic>=2",
+    "typer",
+    "rich",
+    "textual",
+    "rapidfuzz",
+    "scipy",
+    "numpy",
+    "Pillow",
+    "av",
+    "pytesseract",
+    "pysubs2",
+    "mwparserfromhell",
+    "PyYAML",
+]
+
+[project.optional-dependencies]
+llm = ["anthropic"]
+asr = ["faster-whisper"]
+
+[dependency-groups]
+dev = ["pytest", "ruff"]
+
+[project.scripts]
+showvenist = "showvenist.cli:app"
+
+[tool.ruff]
+line-length = 100
+exclude = ["spike/"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

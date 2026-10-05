@@ -1,0 +1,1 @@
+"""Guest character scorer."""

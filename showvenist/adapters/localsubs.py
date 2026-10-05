@@ -1,0 +1,1 @@
+"""Local subtitle folder adapter."""
