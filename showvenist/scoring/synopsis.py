@@ -50,7 +50,7 @@ class SynopsisScorer:
     can_be_negative = False
 
     def score(self, files: list[FileInfo], ctx: ScoreContext) -> ScoreResult:
-        strip = cast_names(ctx.bundle)
+        strip = cast_names(ctx.bundle, ctx.language)
         docs = [
             content_tokens(
                 " ".join([c.episode.title, *(s.text for s in c.episode.synopses)]),

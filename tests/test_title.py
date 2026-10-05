@@ -62,3 +62,11 @@ def test_no_tag_unavailable():
 
 def test_is_generic():
     assert is_generic(None) and not is_generic("The Heist")
+
+
+def test_discovery_is_not_a_generic_disc_name():
+    from showvenist.scoring.title import is_generic
+
+    assert not is_generic("Discovery")
+    assert is_generic("Disc 2") and is_generic("DISC_2") and is_generic("Disc2")
+    assert is_generic("Show Season 1 DVD")

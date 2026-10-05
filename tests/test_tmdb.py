@@ -28,6 +28,8 @@ def make_handler(requests, show=None, groups=None, details=None):
             if ap.startswith("season/"):
                 return httpx.Response(200, json=show)
             return httpx.Response(200, json={k: v for k, v in show.items() if "/" not in k})
+        if path == "/tv/1437/aggregate_credits":
+            return httpx.Response(200, json=load("aggregate_credits.json"))
         if path == "/tv/1437/episode_groups":
             return httpx.Response(200, json=groups)
         if path.startswith("/tv/episode_group/"):
@@ -181,3 +183,12 @@ def test_retry_gives_up_after_three_and_error_hides_key():
         ad.search("x")
     assert len(calls) == 4
     assert V3 not in str(ei.value)
+
+
+def test_series_cast_from_aggregate_credits():
+    ad, reqs = adapter()
+    pb = ad.fetch(1437)
+    assert len(pb.series_cast) == 15
+    first = pb.series_cast[0]
+    assert (first.actor, first.character) == ("Nathan Fillion", "Mal Reynolds")
+    assert any(r.url.path.endswith("/tv/1437/aggregate_credits") for r in reqs)

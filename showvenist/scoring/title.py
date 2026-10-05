@@ -15,7 +15,7 @@ MATCH_LLR = 6.0
 _GENERIC = [
     re.compile(p, re.I)
     for p in (
-        r"disc|disk|dvd|blu-?ray",
+        r"(?<![a-z])(disc|disk|dvd|blu-?ray)(?![a-z])",
         r"^(season|series|s)\s*\d+\b",
         r"^(title|track|chapter|episode|ep|part|pt|volume|vol|clip|video|t|c)[\s._-]*\d+$",
         r"^[a-z]?\d+$",

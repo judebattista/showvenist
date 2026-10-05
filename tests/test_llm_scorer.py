@@ -200,7 +200,8 @@ def test_disc_window_failed_requires_both_orders():
 
     s2 = LlmScorer(Fake(half))
     r = s2.score(files, ctx)
-    assert r.available[0] and not s2.disc_window_failed(0)
+    # one order alone loses the bias correction: the file stays in the base regime (§10.2)
+    assert not r.available[0] and not s2.disc_window_failed(0)
     # single-order mode: one order suffices
     s3 = LlmScorer(Fake(none_top), send_both_orders=False)
     s3.score(files, ctx)
@@ -237,3 +238,14 @@ def test_lazy_anthropic_import(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "anthropic", None)  # import would fail
     LlmScorer()  # constructing must not import it
+
+
+def test_cache_key_covers_prompt_schema_and_limits(monkeypatch):
+    from showvenist.scoring import llm as L
+
+    a = LlmScorer(Fake(lambda kw: None))._key("block", "excerpt")
+    monkeypatch.setattr(L, "INSTRUCTIONS", L.INSTRUCTIONS + " changed")
+    assert LlmScorer(Fake(lambda kw: None))._key("block", "excerpt") != a
+    monkeypatch.undo()
+    monkeypatch.setattr(L, "MAX_TOKENS", L.MAX_TOKENS + 1)
+    assert LlmScorer(Fake(lambda kw: None))._key("block", "excerpt") != a

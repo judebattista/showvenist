@@ -31,3 +31,15 @@ def test_parenthetical_ignored_and_no_dialogue():
     res = _run([["Wilhelmina!"], None])
     assert res.llr[0, 5] > 0
     assert list(res.available) == [True, False] and not res.llr[1].any()
+
+
+def test_series_cast_characters_ignored():
+    from showvenist.bundle.schema import CastEntry
+
+    b = make_bundle(6, guests=GUESTS)
+    b.series_cast = [CastEntry(actor="Main Star", character="Zorblax")]
+    ctx = make_ctx(b)
+    f = make_file("f.mkv", lines=["Zorblax and Quenta"])
+    res = GuestScorer().score([f], ctx)
+    assert math.isclose(res.llr[0, 1], math.log(6))  # only quenta (unique to ep 1) counts
+    assert res.llr[0, 0] == 0 and res.notes[(0, 1)] == {"names": ["quenta"]}

@@ -314,3 +314,142 @@ def test_weights_config_round_trip():
     assert to_weights_config({}, {}) == WeightsConfig()
     with pytest.raises(ValueError):
         to_weights_config({"bogus": 1.0}, {})
+
+
+# ---- review fixes: LLM weights kept, target_set, held-out metrics -----------------------------
+
+
+def test_write_weights_without_llm_keeps_existing_llm_weights(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text(CONFIG)  # [weights.llm] llm = 2.0 (hand-set)
+    for llm in (None, {}):
+        write_weights(p, BASE_W, llm)
+        raw = tomllib.loads(p.read_text())
+        assert raw["weights"]["llm"] == {"llm": 2.0}  # untouched, no defaults filled in
+        assert raw["weights"]["synopsis"] == 2.5
+        assert "# files the LLM has scored (§11.1)" in p.read_text()
+    cfg = load_config(p, env={})
+    assert cfg.weights.llm.llm == 2.0 and cfg.weights.llm.duration == 1.0
+    # dotted keys inside [weights] are LLM weights too: also kept
+    text = render_weights("[weights]\nllm.llm = 3.0\nduration = 2.0\n", BASE_W, None)
+    assert tomllib.loads(text)["weights"]["llm"] == {"llm": 3.0}
+    # no [weights.llm] anywhere: none is created
+    assert "[weights.llm]" not in render_weights("", BASE_W, None)
+
+
+def _set_item(s, tset, E=6):
+    return FitItem("a", "base", {"synopsis": np.asarray(s, float)}, E, "any_episode",
+                   target_set=tset)
+
+
+def test_set_label_uses_target_set():
+    s = [3.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    w = {"synopsis": 1.0}
+    S = log_prior(6) + np.clip(np.asarray(s), 0, 4)
+    full = logsumexp(np.append(S, 0.0))
+    # every episode (no target_set): the mass of all columns
+    assert mean_log_loss([_set_item(s, None)], "base", w) == pytest.approx(
+        full - logsumexp(S))
+    # only columns 1..5 (column 0 is held by a labeled file): evidence on 0 now hurts
+    ll = mean_log_loss([_set_item(s, (1, 2, 3, 4, 5))], "base", w)
+    assert ll == pytest.approx(full - logsumexp(S[1:]))
+    assert ll > mean_log_loss([_set_item(s, None)], "base", w)
+    # gradient still matches finite differences with set labels
+    rng = np.random.default_rng(11)
+    items = [
+        FitItem("a", "base", {k: np.abs(rng.normal(0, 1, 6)) for k in BASE}, 6, "any_episode",
+                target_set=tuple(sorted(rng.choice(6, 3, replace=False).tolist())))
+        for _ in range(30)
+    ] + synth_items(30, E=6, seed=12)
+    d = _build(items, "base", DEFAULT_CLAMPS, PI_X_DEFAULT, None)
+    w0, wv = np.ones(len(BASE)), rng.uniform(0.2, 2.0, len(BASE))
+    _, g = _objective(wv, d, 0.3, w0)
+    eps = 1e-6
+    num = [(_objective(wv + eps * e, d, 0.3, w0)[0] - _objective(wv - eps * e, d, 0.3, w0)[0])
+           / (2 * eps) for e in np.eye(len(wv))]
+    np.testing.assert_allclose(g, num, rtol=1e-5, atol=1e-5)
+    for bad in ((), (6,)):
+        with pytest.raises(ValueError):
+            _build([_set_item(s, bad)], "base", DEFAULT_CLAMPS, PI_X_DEFAULT, None)
+
+
+def test_fit_items_carry_target_set_and_regimes():
+    from showvenist.eval.render import fit_items, solve_items
+    from showvenist.eval.runner import EvidenceRow
+
+    def row(kind, target=None, tset=None, regime="base"):
+        llr = {"refsubs": np.array([5.0, 0.0, 0.0]), "synopsis": np.array([1.0, 0, 0])}
+        avail = {"refsubs": True, "synopsis": True}
+        if regime == "llm":
+            llr["llm"] = np.array([4.0, -1.0, -1.0])
+            avail["llm"] = True
+        return EvidenceRow("p", ["a", "b", "c"], llr, avail, regime, 0.0, kind, target, tset)
+
+    rows = [row("episode?", tset=[1, 2]), row("episode?", tset=[]), row("episode", 0),
+            row("extra", -1, regime="llm"), row("episode", 0, regime="llm")]
+    items = fit_items(rows, "s1", llm_eligible=[True, True, True, True, False])
+    assert [(i.regime, i.target) for i in items] == [
+        ("base", "any_episode"), ("base", "episode"), ("base", "extra"), ("llm", "extra"),
+        ("base", "episode")]
+    assert items[0].target_set == (1, 2)
+    assert set(items[2].llr) == {"refsubs", "synopsis"}  # base item: no LLM evidence
+    assert set(items[3].llr) == {"refsubs", "llm"}  # LLM regime: synopsis replaced
+    solved = solve_items(rows, "s1")
+    assert [i.regime for i in solved] == ["base", "base", "llm", "llm"]
+
+
+def test_heldout_metrics_resolves_stored_evidence():
+    from showvenist.eval.render import heldout_metrics
+
+    E = 4
+
+    def ep(col, strength=8.0):
+        r = np.full(E, -3.0)
+        r[col] = strength
+        return {"refsubs": r}
+
+    season1 = [FitItem("s1", "base", ep(c), E, "episode", c) for c in range(3)]
+    season1.append(FitItem("s1", "base", {"refsubs": np.full(E, -4.0)}, E, "extra"))
+    season2 = [FitItem("s2", "base", ep(c), E, "episode", c) for c in (0, 1)]
+    # an `episode?` file whose evidence points at column 0, which a labeled file holds
+    season2.append(FitItem("s2", "base", ep(0, 12.0), E, "any_episode", target_set=(2, 3)))
+    by = {"s1": season1, "s2": season2}
+
+    good = heldout_metrics(by, WeightsConfig())
+    assert good.files == 7 and good.episode_unknown_files == 1
+    # one joint solve per season (at most once): the stronger `episode?` file takes column 0
+    # from the labeled S2 file, which is then wrong; the contested pair isn't high
+    assert good.top1 == pytest.approx(5 / 6)
+    assert good.precision_high.errors == 0 and good.precision_high.n == 4
+    without = heldout_metrics({"s1": season1, "s2": season2[:2]}, WeightsConfig())
+    assert without.top1 == 1.0 and without.coverage_high >= 0.8
+    off = WeightsConfig(refsubs=0.0)  # per-season weights; no evidence left: prior only
+    m = heldout_metrics(by, {"s1": off, "s2": off})
+    assert m.coverage_high == 0.0 and m.precision_high is None  # ties: nothing is high
+    with pytest.raises(ValueError):
+        heldout_metrics({"x": [season1[0], FitItem("x", "base", {}, 5, "extra")]},
+                        WeightsConfig())
+
+
+def test_heldout_metrics_provable_error_counted():
+    from showvenist.eval.render import heldout_metrics
+
+    E = 3
+    r = np.array([10.0, -4.0, -4.0])
+    items = [FitItem("s", "base", {"refsubs": r}, E, "any_episode", target_set=(1, 2))]
+    m = heldout_metrics({"s": items}, WeightsConfig())
+    assert m.episode_unknown_provable_errors == 1
+    assert m.precision_high.errors == 1 and m.precision_high.n == 1 and m.top1 is None
+    ok = [FitItem("s", "base", {"refsubs": r}, E, "any_episode", target_set=(0, 1))]
+    assert heldout_metrics({"s": ok}, WeightsConfig()).precision_high is None
+
+
+def test_heldout_metrics_unmatched():
+    from showvenist.eval.render import heldout_metrics
+
+    E = 3
+    r = np.array([9.0, -4.0, -4.0])
+    items = [FitItem("s", "base", {"refsubs": r}, E, "episode", 0),
+             FitItem("s", "base", {"refsubs": np.full(E, -4.0)}, E, "extra")]
+    m = heldout_metrics({"s": items}, WeightsConfig())
+    assert m.unmatched_precision == 1.0 and m.unmatched_recall == 1.0

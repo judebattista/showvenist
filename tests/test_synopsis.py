@@ -76,3 +76,21 @@ def test_matches_spike_numerically():
         want = np.minimum(sp.synopsis_llr(docs, query), 4.0)
         got = np.minimum(bm25_llr(Bm25(docs), query), 4.0)
         assert np.allclose(got, want)
+
+
+def test_series_cast_name_gets_no_credit():
+    from showvenist.bundle.schema import CastEntry
+
+    syn = ["Zorblax visits the lighthouse", *SYN[1:]]
+    b = make_bundle(6, synopses=syn)
+    f = make_file(lines=["Zorblax is here, zorblax!"])
+    assert SynopsisScorer().score([f], make_ctx(b)).llr[0, 0] > 0  # control: not yet series cast
+    b.series_cast = [CastEntry(actor="Some Body", character="Zorblax")]
+    assert not SynopsisScorer().score([f], make_ctx(b)).llr.any()
+
+
+def test_dictionary_word_guest_name_stays_in_synopsis():
+    syn = ["The nurse arrives at the quarantine", *SYN[1:]]
+    b = make_bundle(6, synopses=syn, guests=[["Nurse"], [], [], [], [], []])
+    res = SynopsisScorer().score([make_file(lines=["Call the nurse, nurse!"])], make_ctx(b))
+    assert res.llr[0, 0] > 0 and int(res.llr[0].argmax()) == 0

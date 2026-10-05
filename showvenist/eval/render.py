@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping, Sequence
 
+import numpy as np
+
+from showvenist.assign.basic import assign_basic
+from showvenist.assign.confidence import confidence
+from showvenist.config import WeightsConfig
 from showvenist.eval.fit import FitItem
-from showvenist.eval.runner import EvidenceRow
-from showvenist.eval.types import EvalResult, MetricSet
+from showvenist.eval.harness import LEVELS, clopper_pearson_upper
+from showvenist.eval.runner import EvidenceRow, GroupRun
+from showvenist.eval.types import EvalResult, MetricSet, RateWithBound
+from showvenist.fusion import fuse
+from showvenist.scoring.types import DEFAULT_CLAMPS, PI_X_DEFAULT, REGIME_SCORERS, ScoreResult
 
 
 def _pct(x: float | None) -> str:
@@ -45,8 +53,10 @@ def format_eval(result: EvalResult) -> str:
     if o.reliability:
         lines += ["", "reliability (correct share): " + ", ".join(
             f"{k} {100 * v:.1f}%" for k, v in o.reliability.items())]
+    if o.cost_usd:
+        lines += ["", f"LLM cost: ${o.cost_usd:.4f} (new API spend; cached responses are free)"]
     if result.problems:
-        lines += ["", f"{len(result.problems)} labels/files left out:"] + [
+        lines += ["", f"{len(result.problems)} problems (left out unless noted):"] + [
             f"  {p.row.path}: {p.reason}" for p in result.problems[:10]
         ]
         if len(result.problems) > 10:
@@ -54,18 +64,180 @@ def format_eval(result: EvalResult) -> str:
     return "\n".join(lines)
 
 
-def fit_items(rows: Iterable[EvidenceRow], season_key: str) -> list[FitItem]:
-    """Labeled evidence rows -> FitItems (decision 41: `episode?` is a set label)."""
+def _item(r: EvidenceRow, season_key: str, regime: str, names: Iterable[str]) -> FitItem | None:
+    llr = {k: r.llr[k] for k in names if k in r.llr and r.available.get(k, False)}
+    common = dict(season_key=season_key, regime=regime, llr=llr, n_candidates=len(r.candidates))
+    if r.label_kind == "episode" and r.target is not None and r.target >= 0:
+        return FitItem(target="episode", target_index=r.target, **common)
+    if r.label_kind == "extra":
+        return FitItem(target="extra", **common)
+    if r.label_kind == "episode?":
+        tset = None if r.target_set is None else tuple(r.target_set)
+        if tset is not None and not tset:
+            return None  # every episode is held by a labeled file: nothing to learn from it
+        return FitItem(target="any_episode", target_set=tset, **common)
+    return None
+
+
+def fit_items(
+    rows: Iterable[EvidenceRow],
+    season_key: str,
+    llm_eligible: Sequence[bool] | None = None,
+) -> list[FitItem]:
+    """Labeled evidence rows -> FitItems for the two fits (§16.3).
+
+    Every row gives a "base" item (base scorers only: base weights are fitted on all files,
+    without the LLM). A row the LLM scored also gives an "llm" item when `llm_eligible[i]`
+    (the files `--llm auto` would send; None = all of them). `episode?` rows are set labels
+    over their `target_set` (decision 41).
+    """
+    out: list[FitItem] = []
+    for i, r in enumerate(rows):
+        it = _item(r, season_key, "base", REGIME_SCORERS["base"])
+        if it is None:
+            continue
+        out.append(it)
+        if r.regime == "llm" and (llm_eligible is None or llm_eligible[i]):
+            llm_it = _item(r, season_key, "llm", REGIME_SCORERS["llm"])
+            if llm_it is not None:
+                out.append(llm_it)
+    return out
+
+
+def solve_items(rows: Iterable[EvidenceRow], season_key: str) -> list[FitItem]:
+    """One item per labeled row in the regime it was actually solved in (for
+    `heldout_metrics` over both regimes)."""
     out: list[FitItem] = []
     for r in rows:
-        llr = {k: v for k, v in r.llr.items() if r.available.get(k, False)}
-        common = dict(
-            season_key=season_key, regime=r.regime, llr=llr, n_candidates=len(r.candidates)
-        )
-        if r.label_kind == "episode" and r.target is not None and r.target >= 0:
-            out.append(FitItem(target="episode", target_index=r.target, **common))
-        elif r.label_kind == "extra":
-            out.append(FitItem(target="extra", **common))
-        elif r.label_kind == "episode?":
-            out.append(FitItem(target="any_episode", **common))
+        it = _item(r, season_key, r.regime, REGIME_SCORERS[r.regime])
+        if it is not None:
+            out.append(it)
     return out
+
+
+# ---- metrics from stored evidence -----------------------------------------------------------
+
+
+def _season_solve(
+    items: Sequence[FitItem], weights: WeightsConfig, pi_x: float
+) -> tuple[list[int], list[str]]:
+    E = items[0].n_candidates
+    if any(it.n_candidates != E for it in items):
+        raise ValueError("items of one season must share the candidate set")
+    F = len(items)
+    names = {k for it in items for k in it.llr}
+    results: dict[str, ScoreResult] = {}
+    for k in sorted(names):
+        res = ScoreResult.empty(F, E)
+        for i, it in enumerate(items):
+            if k in it.llr:
+                res.llr[i] = np.asarray(it.llr[k], dtype=float)
+                res.available[i] = True
+        results[k] = res
+    if results:
+        fused = fuse(results, weights, DEFAULT_CLAMPS, pi_x)
+    else:
+        fused = fuse({}, weights, DEFAULT_CLAMPS, pi_x, history_penalty=np.zeros((F, E)))
+    a = assign_basic(fused.S)
+    return list(a.column), [c.level for c in confidence(fused.S, a)]
+
+
+def heldout_metrics(
+    items_by_season: Mapping[str, Sequence[FitItem]],
+    weights: WeightsConfig | Mapping[str, WeightsConfig],
+    pi_x: float = PI_X_DEFAULT,
+) -> MetricSet:
+    """Top-1, coverage and precision at high, re-solving each season's assignment (fusion +
+    basic assignment + confidence) from the items' stored raw evidence.
+
+    `weights` is one WeightsConfig for every season, or one per season key (the weights fitted
+    with that season held out). An item's regime is that of its evidence (an "llm" key makes
+    it an LLM-regime file). `episode?` items are scored as in decision 41: only an `extra` at
+    high, or a high decision outside their `target_set`, counts (as an error).
+    """
+    known: list[tuple[bool, str]] = []  # (correct, level)
+    proven = 0
+    n_unknown = 0
+    unm: list[tuple[bool, bool]] = []  # (labeled extra, decided extra); `episode?` = not extra
+    for key, items in items_by_season.items():
+        if not items:
+            continue
+        w = weights if isinstance(weights, WeightsConfig) else weights[key]
+        cols, levels = _season_solve(items, w, pi_x)
+        for it, col, level in zip(items, cols, levels, strict=True):
+            unm.append((it.target == "extra", col < 0))
+            if it.target == "any_episode":
+                n_unknown += 1
+                if level == "high" and (
+                    col < 0 or (it.target_set is not None and col not in it.target_set)
+                ):
+                    proven += 1
+                continue
+            ok = col == it.target_index if it.target == "episode" else col < 0
+            known.append((ok, level))
+    ms = MetricSet(files=len(known) + n_unknown, episode_unknown_files=n_unknown,
+                   episode_unknown_provable_errors=proven)
+    if known:
+        ms.top1 = sum(ok for ok, _ in known) / len(known)
+        ms.coverage_high = sum(lv == "high" for _, lv in known) / len(known)
+        for level in LEVELS:
+            at = [ok for ok, lv in known if lv == level]
+            if at:
+                ms.reliability[level] = sum(at) / len(at)
+    tp = sum(a and d for a, d in unm)
+    predicted, actual = sum(d for _, d in unm), sum(a for a, _ in unm)
+    ms.unmatched_precision = tp / predicted if predicted else None
+    ms.unmatched_recall = tp / actual if actual else None
+    high = [ok for ok, lv in known if lv == "high"]
+    n = len(high) + proven
+    errors = sum(not ok for ok in high) + proven
+    if n:
+        ms.precision_high = RateWithBound(errors, n, clopper_pearson_upper(errors, n))
+    return ms
+
+
+def format_heldout(title: str, before: MetricSet, after: MetricSet) -> str:
+    head = (
+        f"{'':<30} {'files':>5} {'top-1':>6} {'cov@hi':>6}  {'errors@high (95% bound)':<18} "
+        f"{'unm.P':>6} {'unm.R':>6}"
+    )
+    return "\n".join([title, head, _line("default weights", before),
+                      _line("fitted (season held out)", after)])
+
+
+def format_ablation(rows: Sequence[tuple[str, MetricSet]]) -> str:
+    """Per-signal ablation (§16.1): the metrics with each scorer removed in turn."""
+    head = (
+        f"{'ablation':<30} {'files':>5} {'top-1':>6} {'cov@hi':>6}  "
+        f"{'errors@high (95% bound)':<18} {'unm.P':>6} {'unm.R':>6}"
+    )
+    return "\n".join([head] + [_line(name, m) for name, m in rows])
+
+
+def format_times(groups: Sequence[GroupRun]) -> str:
+    """Time per season (wall clock), split into analysis (I/O + OCR), scoring and solve, and
+    the LLM spend when it ran."""
+    lines = [
+        "time per season",
+        f"{'season':<30} {'files':>5} {'analyze':>8} {'score':>7} {'solve':>7} {'total':>8} "
+        f"{'LLM $':>8}",
+    ]
+    tot = {"analyze": 0.0, "score": 0.0, "solve": 0.0, "total": 0.0}
+    n = 0
+    usd = 0.0
+    for g in groups:
+        s = g.seconds
+        f = len(g.solution.files) + len(g.session.duplicates)
+        lines.append(
+            f"{g.key:<30} {f:>5} {s.get('analyze', 0):>7.1f}s {s.get('score', 0):>6.1f}s "
+            f"{s.get('solve', 0):>6.1f}s {s.get('total', 0):>7.1f}s {g.llm_cost_usd:>8.4f}"
+        )
+        for k in tot:
+            tot[k] += s.get(k, 0.0)
+        n += f
+        usd += g.llm_cost_usd
+    lines.append(
+        f"{'total':<30} {n:>5} {tot['analyze']:>7.1f}s {tot['score']:>6.1f}s "
+        f"{tot['solve']:>6.1f}s {tot['total']:>7.1f}s {usd:>8.4f}"
+    )
+    return "\n".join(lines)

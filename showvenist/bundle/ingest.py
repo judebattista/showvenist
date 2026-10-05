@@ -85,6 +85,7 @@ def ingest(
         episodes=partial.episodes,
         orderings=partial.orderings,
         provenance=partial.provenance,
+        series_cast=partial.series_cast,
     )
     slug = slugify(bundle.show.title, bundle.show.year)
     existing = bundle_path(slug, root) / "show.json"

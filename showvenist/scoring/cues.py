@@ -15,7 +15,7 @@ class CuesScorer:
     def score(self, files: list[FileInfo], ctx: ScoreContext) -> ScoreResult:
         if not any(c.episode.llm_cues for c in ctx.candidates):
             return ScoreResult.empty(len(files), ctx.n_candidates)
-        strip = cast_names(ctx.bundle)  # cues that are cast/character names are dropped
+        strip = cast_names(ctx.bundle, ctx.language)  # cast/character names dropped
         docs = []
         for c in ctx.candidates:
             cues = c.episode.llm_cues

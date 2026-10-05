@@ -117,3 +117,84 @@ def test_path_season():
     assert path_season("/a/Season02/t.mkv") == 2
     assert path_season("/a/Season_11/t.mkv") == 11
     assert path_season("/a/Specials/t.mkv") is None
+
+
+def test_season_from_folder_wins_and_mismatch_is_reported(corpus, tmp_path):
+    _, bundles, bdirs, root = corpus
+    # labeled in season 2's numbering, but it sits in the Season 1 folder (chronology labels)
+    p = make_episode_mkv(root / "chrono" / "Season 1" / "t.mkv", 14, dialogue_for(2))
+    ok = make_episode_mkv(root / "chrono" / "Season 1" / "u.mkv", 8, dialogue_for(0))
+    rows = [ManifestRow(path=str(p), show=SLUG, label="S02E03"),
+            ManifestRow(path=str(ok), show=SLUG, label="S01E01")]
+    groups = []
+    decisions, result = run_eval(rows, bundles, Config(), bdirs, None, on_group=groups.append)
+    assert [g.season for g in groups] == [1]  # one group: the folder's season
+    notes = [pr.reason for pr in result.problems if pr.row.path == str(p)]
+    assert len(notes) == 1 and "season mismatch" in notes[0] and "Season 1" in notes[0]
+    assert len(decisions) == 2  # kept and scored, not left out
+    # its labeled episode (S02E03) isn't a candidate of season 1: no fit target
+    table = evidence_table(groups[0].solution, groups[0].labels)
+    assert table[0].target is None and table[1].target == 0
+
+
+def test_group_timing_and_resolve_from_stored_evidence(corpus, tmp_path):
+    from showvenist.eval.runner import group_decisions, resolve_metrics
+
+    rows, bundles, bdirs, _ = corpus
+    groups = []
+    decisions, result = run_eval(rows, bundles, Config(), bdirs,
+                                 AnalysisCache(tmp_path / "a.db"), on_group=groups.append)
+    for g in groups:
+        assert set(g.seconds) == {"analyze", "score", "solve", "total"}
+        assert g.seconds["total"] >= g.seconds["analyze"] >= 0
+        assert len(g.first_levels) == len(g.solution.files) and not g.llm_sent
+    assert result.overall.cost_usd == 0.0
+    # re-solving the stored evidence reproduces the run exactly
+    again = {}
+    for g in groups:
+        again.update(group_decisions(g))
+    assert again == {d.path: d for d in decisions}
+    same = resolve_metrics(groups, bundles)
+    assert same.overall == result.overall
+    # ablation: without any scorer only the prior is left, nothing reaches high
+    names = set(groups[0].solution.results)
+    none = resolve_metrics(groups, bundles, drop=names)
+    assert none.overall.coverage_high == 0.0
+    no_refsubs = resolve_metrics(groups, bundles, drop={"refsubs"})
+    assert no_refsubs.overall.files == result.overall.files
+
+
+def test_run_eval_llm_needs_approval_and_records_cost(corpus, tmp_path):
+    from showvenist.scoring.llm import LlmScorer
+    from tests.test_session import FakeLlmClient
+
+    rows, bundles, bdirs, _ = corpus
+    clients = []
+
+    def factory():
+        clients.append(FakeLlmClient())
+        return LlmScorer(clients[-1])
+
+    estimates = []
+    groups = []
+    _, result = run_eval(rows, bundles, Config(), bdirs, AnalysisCache(tmp_path / "a.db"),
+                         llm_mode="all", llm_factory=factory,
+                         approve=lambda est: estimates.append(est) or False,
+                         on_group=groups.append)
+    assert all(e > 0 for e in estimates) and len(estimates) == 2
+    assert all(not c.calls for c in clients)  # refused: no call was made
+    assert all(g.llm_refused and g.llm_cost_usd == 0 for g in groups)
+    assert result.overall.cost_usd == 0.0
+
+    groups.clear()
+    _, result = run_eval(rows, bundles, Config(), bdirs, AnalysisCache(tmp_path / "a.db"),
+                         llm_mode="all", llm_factory=factory, approve=lambda est: True,
+                         on_group=groups.append)
+    assert sum(len(c.calls) for c in clients) > 0
+    assert result.overall.cost_usd > 0
+    assert result.overall.cost_usd == pytest.approx(sum(g.llm_cost_usd for g in groups))
+    assert result.per_season[f"{SLUG}-S01"].cost_usd == pytest.approx(groups[0].llm_cost_usd)
+    assert "llm" in groups[0].solution.regimes
+    assert result.overall.top1 == 1.0
+    with pytest.raises(ValueError):
+        run_eval(rows, bundles, Config(), bdirs, None, llm_mode="sometimes")

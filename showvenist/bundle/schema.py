@@ -135,6 +135,8 @@ class Bundle(_Model):
     episodes: list[Episode] = Field(default_factory=list)
     orderings: dict[str, Ordering] = Field(default_factory=dict)
     provenance: list[Provenance] = Field(default_factory=list)
+    # Series-level (main) cast; optional so bundles written before M3 still load.
+    series_cast: list[CastEntry] = Field(default_factory=list)
 
     def episode_by_id(self) -> dict[str, Episode]:
         return {e.id: e for e in self.episodes}
@@ -171,3 +173,4 @@ class PartialBundle(_Model):
     episodes: list[Episode] = Field(default_factory=list)
     orderings: dict[str, Ordering] = Field(default_factory=dict)
     provenance: list[Provenance] = Field(default_factory=list)
+    series_cast: list[CastEntry] = Field(default_factory=list)

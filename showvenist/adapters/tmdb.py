@@ -194,6 +194,16 @@ class TmdbAdapter:
                 type_rank=rank[gtype],
             )
 
+        credits = self._get(f"/tv/{tmdb_id}/aggregate_credits")
+        series_cast = [
+            CastEntry(
+                actor=c["name"],
+                character=((c.get("roles") or [{}])[0].get("character") or ""),
+            )
+            for c in credits.get("cast", []) or []
+            if c.get("name")
+        ]
+
         fad = show.get("first_air_date") or ""
         ext = show.get("external_ids") or {}
         info = ShowInfo(
@@ -208,6 +218,7 @@ class TmdbAdapter:
             episodes=list(episodes.values()),
             orderings=orderings,
             provenance=list(self._provenance),
+            series_cast=series_cast,
         )
 
     @staticmethod

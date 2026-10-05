@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+import re
 import shutil
 from pathlib import Path
 
@@ -216,3 +217,65 @@ def test_disc_of():
 def test_no_candidates_raises():
     with pytest.raises(ValueError):
         Session(synth_bundle(), None, Config(), season=9)
+
+
+# ---- LLM pass (§10.2) with a fake client: never the network ------------------------------------
+
+
+class FakeLlmClient:
+    """Stands in for anthropic.Anthropic(): `messages.parse(**request)`. Rates the candidate
+    whose topic words the excerpt contains, quoting the excerpt verbatim."""
+
+    def __init__(self):
+        self.calls: list[dict] = []
+        self.messages = self
+
+    def parse(self, **kw):
+        from types import SimpleNamespace as NS
+
+        from showvenist.scoring.llm import CandidateScore, LLMResult
+
+        self.calls.append(kw)
+        block, excerpt = (c["text"] for c in kw["messages"][0]["content"])
+        labels = re.findall(r"\[(S\d+E\d+)\]", block)
+        top = None
+        for k, topic in enumerate(TOPICS):
+            word = topic.split()[0]
+            if word in excerpt:
+                top = next((lb for lb in labels if int(lb.split("E")[1]) == k + 1), None)
+                at = excerpt.index(word)
+                quote = excerpt[max(0, at - 10): at + 20]
+                break
+        scores = [
+            CandidateScore(episode=lb, probability=0.9 if lb == top else 0.01,
+                           quotes=[quote] if lb == top else [])
+            for lb in labels
+        ]
+        usage = NS(input_tokens=1000, output_tokens=200, cache_creation_input_tokens=0,
+                   cache_read_input_tokens=0)
+        return NS(parsed_output=LLMResult(scores=scores, none_probability=0.02),
+                  stop_reason="end_turn", usage=usage)
+
+
+def test_llm_pass_targets_and_apply(session, rips):
+    from showvenist.scoring.llm import LlmScorer
+
+    sol = session.solve()
+    assert session.llm_targets("off") == []
+    assert session.llm_targets("all") == [0, 1, 2]
+    assert session.llm_targets("auto") == [
+        i for i, c in enumerate(sol.confidences) if c.level != "high"
+    ]
+    assert 2 in session.llm_targets("auto")  # the no-dialogue file is below high
+    with pytest.raises(ValueError):
+        session.llm_targets("sometimes")
+    client = FakeLlmClient()
+    llm = LlmScorer(client)
+    llm.send = {0, 1}
+    assert llm.estimate_cost(session.files, session.context()) > 0
+    sol = session.apply_llm(llm)
+    assert len(client.calls) == 4  # two files, both candidate orders
+    assert sol.regimes == ["llm", "llm", "base"]
+    assert {"duration", "refsubs", "llm"} <= set(sol.results)
+    assert _assigned(sol, rips["e3"]) == "S01E03" and _assigned(sol, rips["e1"]) == "S01E01"
+    assert llm.total_cost_usd > 0

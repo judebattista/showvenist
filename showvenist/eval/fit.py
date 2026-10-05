@@ -51,7 +51,9 @@ class FitItem:
 
     `llr` maps scorer name -> RAW (unclamped, unweighted) (E,) evidence for this file; a scorer
     that is missing or unavailable for the file is simply absent (it contributes 0).
-    `target == "any_episode"` is the decision-41 set label for `episode?` files.
+    `target == "any_episode"` is the decision-41 set label for `episode?` files: the target
+    is the softmax mass of the columns in `target_set` (the episodes no other labeled file
+    holds), or of every episode when `target_set` is None.
     """
 
     season_key: str
@@ -60,6 +62,7 @@ class FitItem:
     n_candidates: int
     target: Target
     target_index: int | None = None
+    target_set: tuple[int, ...] | None = None
 
 
 # ---- the objective ---------------------------------------------------------------------------
@@ -73,6 +76,7 @@ class _Data:
     prior: np.ndarray  # (N,)
     kind: np.ndarray  # (N,) 0 episode, 1 extra, 2 any_episode
     tidx: np.ndarray  # (N,) target column for kind 0, else 0
+    tset: np.ndarray  # (N, Emax) True for the set-label columns of kind 2
     c: np.ndarray  # (N,) item weights, sum == N
 
     @property
@@ -117,6 +121,7 @@ def _build(
     prior = np.zeros(n)
     kind = np.zeros(n, dtype=int)
     tidx = np.zeros(n, dtype=int)
+    tset = np.zeros((n, emax), dtype=bool)
     for i, it in enumerate(items):
         e = it.n_candidates
         if e < 1:
@@ -130,6 +135,14 @@ def _build(
             if it.target_index is None or not 0 <= it.target_index < e:
                 raise ValueError(f"item {i}: episode target_index out of range")
             tidx[i] = it.target_index
+        elif it.target == "any_episode":
+            if it.target_set is None:
+                tset[i, :e] = True
+            else:
+                cols = list(it.target_set)
+                if not cols or any(not 0 <= c < e for c in cols):
+                    raise ValueError(f"item {i}: target_set empty or out of range")
+                tset[i, cols] = True
         for j, name in enumerate(names):
             raw = it.llr.get(name)
             if raw is None:
@@ -139,7 +152,7 @@ def _build(
                 raise ValueError(f"item {i}: llr[{name!r}] has shape {raw.shape}, want ({e},)")
             lo, hi = _range(name, clamps)
             X[i, :e, j] = np.clip(raw, lo, hi)
-    return _Data(names, X, mask, prior, kind, tidx, _item_weights(kind, extras_share))
+    return _Data(names, X, mask, prior, kind, tidx, tset, _item_weights(kind, extras_share))
 
 
 def _per_item(w: np.ndarray, d: _Data) -> tuple[np.ndarray, np.ndarray]:
@@ -159,8 +172,10 @@ def _per_item(w: np.ndarray, d: _Data) -> tuple[np.ndarray, np.ndarray]:
     tfeat[ep] = d.X[rows[ep], d.tidx[ep]]
     anyep = d.kind == 2
     if anyep.any():
-        q = np.exp(z[anyep] - lse_ep[anyep, None])  # softmax over episodes only
-        tgt[anyep] = lse_ep[anyep]
+        zs = np.where(d.tset[anyep], z[anyep], -np.inf)  # the set-label columns only
+        lse_set = logsumexp(zs, axis=1)
+        q = np.exp(zs - lse_set[:, None])  # softmax over the target set
+        tgt[anyep] = lse_set
         tfeat[anyep] = np.einsum("ne,nek->nk", q, d.X[anyep])
     return lse - tgt, expected - tfeat
 
@@ -389,31 +404,44 @@ def _rewrite_table(
     return lines[: start + 1] + body + lines[end:]
 
 
-def render_weights(text: str, base: dict[str, float], llm: dict[str, float]) -> str:
-    """Return `text` with only the [weights] and [weights.llm] tables rewritten."""
-    cfg = to_weights_config(base, llm)  # validates the keys
+def render_weights(text: str, base: dict[str, float], llm: dict[str, float] | None) -> str:
+    """Return `text` with only the [weights] and [weights.llm] tables rewritten.
+
+    An empty or None `llm` (no LLM-regime fit) leaves every existing LLM weight untouched.
+    """
+    cfg = to_weights_config(base, llm or {})  # validates the keys
     b = {k: float(getattr(cfg, k)) for k in REGIME_SCORERS["base"]}
     lw = {k: float(getattr(cfg.llm, k)) for k in REGIME_SCORERS["llm"]}
+    old_llm = tomllib.loads(text).get("weights", {}).get("llm") if text.strip() else None
     lines = text.splitlines()
-    # inside [weights], `llm = …` / `llm.x = …` would clash with the [weights.llm] table
-    lines = _rewrite_table(lines, _BASE_HDR, "[weights]", b, drop=re.compile(r"^\s*llm\s*[.=]"))
-    lines = _rewrite_table(lines, _LLM_HDR, "[weights.llm]", lw, after=_BASE_HDR)
+    if llm:
+        # inside [weights], `llm = …` / `llm.x = …` would clash with the [weights.llm] table
+        lines = _rewrite_table(
+            lines, _BASE_HDR, "[weights]", b, drop=re.compile(r"^\s*llm\s*[.=]")
+        )
+        lines = _rewrite_table(lines, _LLM_HDR, "[weights.llm]", lw, after=_BASE_HDR)
+    else:
+        lines = _rewrite_table(lines, _BASE_HDR, "[weights]", b)
     new = "\n".join(lines) + "\n"
     parsed = tomllib.loads(new).get("weights", {})
     got_b = {k: parsed.get(k) for k in b}
-    got_l = {k: parsed.get("llm", {}).get(k) for k in lw}
-    if got_b != {k: float(_fmt(v)) for k, v in b.items()} or got_l != {
-        k: float(_fmt(v)) for k, v in lw.items()
-    }:
+    ok = got_b == {k: float(_fmt(v)) for k, v in b.items()}
+    if llm:
+        got_l = {k: parsed.get("llm", {}).get(k) for k in lw}
+        ok = ok and got_l == {k: float(_fmt(v)) for k, v in lw.items()}
+    else:
+        ok = ok and parsed.get("llm") == old_llm
+    if not ok:
         raise ValueError("could not rewrite the [weights] tables of this config safely")
     return new
 
 
-def write_weights(path: Path, base: dict[str, float], llm: dict[str, float]) -> None:
+def write_weights(path: Path, base: dict[str, float], llm: dict[str, float] | None) -> None:
     """Rewrite ONLY [weights] and [weights.llm] in config.toml, creating file/tables if needed.
 
-    Every other line and comment is kept. The result is checked with tomllib before the file
-    is replaced (atomically).
+    Every other line and comment is kept. With `llm` empty or None the LLM-regime weights are
+    left exactly as they are. The result is checked with tomllib before the file is replaced
+    (atomically).
     """
     path = Path(path)
     text = path.read_text() if path.exists() else ""

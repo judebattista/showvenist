@@ -29,16 +29,20 @@ Pass `on_group=` to receive a `GroupRun` per solved group, then call
 from __future__ import annotations
 
 import re
+import time
 from collections import Counter, defaultdict
-from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path, PurePath
+from typing import Any
 
 import numpy as np
 
 from showvenist.analysis.types import AnalysisCache
+from showvenist.assign.basic import assign_basic
+from showvenist.assign.confidence import confidence
 from showvenist.bundle.schema import Bundle
-from showvenist.config import Config
+from showvenist.config import Config, WeightsConfig
 from showvenist.eval.harness import compute_metrics, find_ordering, resolve_labels
 from showvenist.eval.types import (
     EvalResult,
@@ -48,7 +52,8 @@ from showvenist.eval.types import (
     Problem,
     ResolvedLabel,
 )
-from showvenist.scoring.types import Regime, Scorer
+from showvenist.fusion import fuse
+from showvenist.scoring.types import FileConfidence, Regime, Scorer
 from showvenist.session import Session, Solution, bundle_vocabulary
 
 # progress(done, total, path, error) over every labeled file of the run
@@ -56,6 +61,10 @@ Progress = Callable[[int, int, Path, str | None], None]
 
 _SEASON_RE = re.compile(r"^season[\s._-]*(\d{1,3})$", re.IGNORECASE)
 _LABEL_RE = re.compile(r"^s(\d{1,3})e(\d{1,4})$", re.IGNORECASE)
+
+
+# approve(estimated_usd) -> may the LLM scorer make (paid) calls for this group?
+Approve = Callable[[float], bool]
 
 
 @dataclass
@@ -66,6 +75,17 @@ class GroupRun:
     session: Session
     solution: Solution
     labels: list[ResolvedLabel]
+    # wall-clock seconds: "analyze" (I/O + OCR), "score", "solve" (incl. the LLM pass), "total"
+    seconds: dict[str, float] = field(default_factory=dict)
+    first_levels: list[str] = field(default_factory=list)  # per file, solve without the LLM
+    llm_sent: list[int] = field(default_factory=list)  # file indices sent to the LLM
+    llm_cost_usd: float = 0.0  # new API spend (cache hits are free)
+    llm_estimate_usd: float = 0.0
+    llm_refused: bool = False  # `approve` said no: the group was solved without the LLM
+
+    @property
+    def key(self) -> str:
+        return f"{self.show}-S{self.season or 0:02d}"
 
 
 @dataclass
@@ -90,12 +110,24 @@ def path_season(path: str) -> int | None:
     return None
 
 
-def _label_season(lab: ResolvedLabel) -> int | None:
+def _group_season(lab: ResolvedLabel) -> tuple[int | None, str | None]:
+    """(season, mismatch note). Production reads the season from the folder (§11.3), so the
+    `Season N` folder wins; the label's season (in its own ordering) is the fallback when the
+    path has none. A folder and label that disagree (e.g. chronology labels) get a note."""
+    folder = path_season(lab.row.path)
+    label = None
     if lab.kind == "episode":
         m = _LABEL_RE.match(lab.row.label.strip())
         if m:
-            return int(m.group(1))  # the label is written in its ordering's numbering
-    return path_season(lab.row.path)
+            label = int(m.group(1))
+    if folder is None:
+        return label, None
+    if label is not None and label != folder:
+        return folder, (
+            f"season mismatch: folder says Season {folder}, label {lab.row.label} "
+            f"({lab.row.order}); kept, scored in the folder's season"
+        )
+    return folder, None
 
 
 def _ordering_key(bundle: Bundle, name: str) -> str | None:
@@ -143,11 +175,18 @@ def evidence_table(
     return out
 
 
-def _decisions(session: Session, solution: Solution) -> dict[Path, FileDecision]:
+def _decisions(
+    session: Session,
+    solution: Solution,
+    column: Sequence[int] | None = None,
+    confs: Sequence[FileConfidence] | None = None,
+) -> dict[Path, FileDecision]:
+    column = solution.assignment.column if column is None else column
+    confs = solution.confidences if confs is None else confs
     out: dict[Path, FileDecision] = {}
     for i, f in enumerate(solution.files):
-        col = solution.assignment.column[i]
-        conf = solution.confidences[i]
+        col = column[i]
+        conf = confs[i]
         out[f.path] = FileDecision(
             path=str(f.path),
             kind="extra" if col < 0 else "episode",
@@ -173,19 +212,33 @@ def run_eval(
     progress: Progress | None = None,
     scorers: Sequence[Scorer] | None = None,
     on_group: Callable[[GroupRun], None] | None = None,
+    llm_mode: str = "off",
+    llm_factory: Callable[[], Any] | None = None,
+    approve: Approve | None = None,
 ) -> tuple[list[FileDecision], EvalResult]:
     """Analyze, score and solve every labeled file, then compute the §16.1 metrics.
 
-    Groups are (show, season): an episode label's season comes from the label itself (written
-    in its row's ordering); extras and `episode?` take it from a `Season N` folder. Files with
-    no season form a whole-show group only when the show has no seasoned group; otherwise
-    they're Problems. Each group is solved in the ordering most of its rows name. History prior
-    is off. `scorers` replaces the default scorer set (ablation; an LlmScorer may be included).
+    Groups are (show, season): the season comes from the `Season N` folder, as in production
+    (§11.3); only a path without one falls back to the episode label's season. A folder and
+    label that disagree are reported as a Problem (the file is kept, in the folder's season).
+    Files with no season form a whole-show group only when the show has no seasoned group;
+    otherwise they're Problems. Each group is solved in the ordering most of its rows name.
+    History prior is off. `scorers` replaces the default scorer set.
+
+    LLM (§10.2): with `llm_mode` "auto" or "all", `llm_factory()` builds an LlmScorer per group;
+    after the first solve its `send` set is chosen, its cost estimated, and it runs only if
+    `approve(estimate)` is true (default: only when the estimate is 0, i.e. all cached).
+    Actual spend lands in `cost_usd` (overall and per season).
     """
+    if llm_mode not in ("off", "auto", "all"):
+        raise ValueError(f"unknown LLM mode {llm_mode!r} (off, auto, all)")
     labels, problems = resolve_labels(manifest_rows, bundles)
     groups: dict[tuple[str, int | None], list[ResolvedLabel]] = defaultdict(list)
     for lab in labels:
-        groups[(lab.row.show, _label_season(lab))].append(lab)
+        season, note = _group_season(lab)
+        if note:
+            problems.append(Problem(lab.row, note))
+        groups[(lab.row.show, season)].append(lab)
     seasoned = {show for show, season in groups if season is not None}
     for show, season in list(groups):
         if season is None and show in seasoned:
@@ -197,6 +250,7 @@ def run_eval(
     vocab: dict[str, set[str]] = {}
     decisions: dict[str, FileDecision] = {}
     kept: list[ResolvedLabel] = []
+    cost: dict[str, float] = defaultdict(float)
 
     for (show, season), labs in sorted(groups.items(), key=lambda kv: (kv[0][0], kv[0][1] or 0)):
         bundle = bundles[show]
@@ -230,13 +284,34 @@ def run_eval(
             if progress is not None:
                 progress(done, total, path, err)
 
+        t0 = time.perf_counter()
         session.analyze(list(by_path), progress=_progress)
+        t1 = time.perf_counter()
         for path, err in session.errors.items():
             problems.append(Problem(by_path[path].row, f"unreadable: {err}"))
         if not session.files:
             continue
         session.score()
+        t2 = time.perf_counter()
         solution = session.solve()
+        run = GroupRun(show, season, order, session, solution, labs,
+                       first_levels=[c.level for c in solution.confidences])
+        if llm_mode != "off" and llm_factory is not None:
+            llm = llm_factory()
+            llm.send = set(session.llm_targets(llm_mode))
+            run.llm_sent = sorted(llm.send)
+            if llm.send:
+                run.llm_estimate_usd = llm.estimate_cost(session.files, session.context())
+                ok = approve(run.llm_estimate_usd) if approve else run.llm_estimate_usd == 0
+                if ok:
+                    solution = session.apply_llm(llm)
+                    run.solution = solution
+                    run.llm_cost_usd = llm.total_cost_usd
+                    cost[run.key] += llm.total_cost_usd
+                else:
+                    run.llm_refused = True
+        t3 = time.perf_counter()
+        run.seconds = {"analyze": t1 - t0, "score": t2 - t1, "solve": t3 - t2, "total": t3 - t0}
         for path, d in _decisions(session, solution).items():
             lab = by_path[path]
             decisions[lab.row.path] = FileDecision(
@@ -245,8 +320,67 @@ def run_eval(
             )
             kept.append(lab)
         if on_group is not None:
-            on_group(GroupRun(show, season, order, session, solution, labs))
+            on_group(run)
 
     result = compute_metrics(kept, decisions, bundles)
     result.problems = problems + result.problems
+    _add_cost(result, cost)
     return list(decisions.values()), result
+
+
+def _add_cost(result: EvalResult, cost: Mapping[str, float]) -> None:
+    result.overall.cost_usd = float(sum(cost.values()))
+    for key, usd in cost.items():
+        if key in result.per_season:
+            result.per_season[key].cost_usd = usd
+        show = key.rsplit("-S", 1)[0]
+        if show in result.per_show:
+            result.per_show[show].cost_usd += usd
+
+
+# ---- re-solving stored evidence (ablation, fitted weights) -----------------------------------
+
+
+def group_decisions(
+    group: GroupRun,
+    weights: WeightsConfig | None = None,
+    drop: Collection[str] = (),
+) -> dict[str, FileDecision]:
+    """Re-fuse a solved group's stored raw evidence (minus the `drop`ped scorers, with
+    `weights` or the config's) and re-solve. Keyed by manifest path, duplicates included.
+    Nothing is re-analyzed or re-scored."""
+    sol = group.solution
+    w = group.session.config.weights if weights is None else weights
+    results = {k: v for k, v in sol.results.items() if k not in drop}
+    if results:
+        fused = fuse(results, w)
+    else:
+        fused = fuse({}, w, history_penalty=np.zeros((len(sol.files), len(sol.candidates))))
+    assignment = assign_basic(fused.S)
+    confs = confidence(fused.S, assignment)
+    by_path = {Path(lab.row.path): lab for lab in group.labels}
+    out: dict[str, FileDecision] = {}
+    for path, d in _decisions(group.session, sol, assignment.column, confs).items():
+        lab = by_path[path]
+        out[lab.row.path] = FileDecision(
+            path=lab.row.path, kind=d.kind, episode_id=d.episode_id, level=d.level,
+            delta=d.delta, duplicate=d.duplicate,
+        )
+    return out
+
+
+def resolve_metrics(
+    groups: Iterable[GroupRun],
+    bundles: Mapping[str, Bundle],
+    weights: WeightsConfig | None = None,
+    drop: Collection[str] = (),
+) -> EvalResult:
+    """The §16.1 metrics over stored groups, re-solved by `group_decisions` (ablation:
+    `drop={"synopsis"}` is the run without the synopsis scorer)."""
+    decisions: dict[str, FileDecision] = {}
+    kept: list[ResolvedLabel] = []
+    for g in groups:
+        got = group_decisions(g, weights, drop)
+        decisions.update(got)
+        kept += [lab for lab in g.labels if lab.row.path in got]
+    return compute_metrics(kept, decisions, bundles)

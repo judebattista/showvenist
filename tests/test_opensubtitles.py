@@ -16,6 +16,10 @@ from showvenist.bundle.schema import Bundle, Episode, Ordering, OrderingEntry, S
 
 FIX = Path(__file__).parent / "fixtures" / "opensubtitles"
 KEY, USER, PW, TOKEN = "KEY-secret", "alice", "pw-secret", "tok-abc"
+SRT = b"".join(
+    f"{i}\n00:00:0{i},000 --> 00:00:0{i},500\n{'hi' if i == 3 else 'yo'}\n\n".encode()
+    for i in (1, 2, 3)
+)
 
 
 def load(name):
@@ -38,10 +42,13 @@ class Server:
         if p.endswith("/login"):
             return httpx.Response(200, json=load("login.json"))
         if req.url.host.startswith("dl."):
-            return httpx.Response(200, content=b"1\n00:00:01,000 --> 00:00:02,000\nhi\n")
+            return httpx.Response(200, content=SRT)
         assert req.headers["api-key"] == KEY and req.headers["user-agent"] == "showvenist v0.1"
-        assert req.headers["authorization"] == f"Bearer {TOKEN}"
-        assert req.url.host == "vip-api.opensubtitles.com"
+        if p.endswith("/subtitles"):
+            assert "authorization" not in req.headers  # search needs only the Api-Key
+        else:
+            assert req.headers["authorization"] == f"Bearer {TOKEN}"
+            assert req.url.host == "vip-api.opensubtitles.com"
         if p.endswith("/subtitles"):
             if self.rate_limits:
                 self.rate_limits -= 1
@@ -53,6 +60,10 @@ class Server:
             for r in data["data"]:  # make file ids unique per episode
                 for f in r["attributes"]["files"]:
                     f["file_id"] += 1000 * e
+                r["attributes"]["feature_details"] = {
+                    "season_number": int(req.url.params["season_number"]), "episode_number": e,
+                    "parent_tmdb_id": 77,
+                }
             return httpx.Response(200, json=data)
         if p.endswith("/download"):
             fid = json.loads(req.content)["file_id"]
@@ -68,6 +79,7 @@ class Server:
 def adapter(server, **kw):
     c = httpx.Client(transport=httpx.MockTransport(server))
     kw.setdefault("sleep", lambda s: None)
+    kw.setdefault("clock", lambda: 0.0)
     return OpenSubtitlesAdapter(KEY, USER, PW, client=c, **kw)
 
 
@@ -88,15 +100,30 @@ def test_login_and_base_url():
     a = adapter(s)
     hit = a.search_episode(parent_tmdb_id=77, season=1, episode=1, language="en")
     assert hit is not None
-    login = s.reqs[0]
+    assert [r.url.path for r in s.reqs] == ["/api/v1/subtitles"]  # no login for search
+    assert s.reqs[0].url.host == "api.opensubtitles.com"
+    q = s.reqs[0].url.params
+    assert q["parent_tmdb_id"] == "77" and q["season_number"] == "1" and q["type"] == "episode"
+    a.download(5)
+    login = next(r for r in s.reqs if r.url.path.endswith("/login"))
     assert json.loads(login.content) == {"username": USER, "password": PW}
     assert "api-key" in login.headers and "authorization" not in login.headers
-    assert s.reqs[1].url.host == "vip-api.opensubtitles.com"
-    q = s.reqs[1].url.params
-    assert q["parent_tmdb_id"] == "77" and q["season_number"] == "1" and q["type"] == "episode"
-    a.search_episode(imdb="tt0303461", season=1, episode=2, language="en")
-    assert s.reqs[-1].url.params["parent_imdb_id"] == "0303461"
+    dl = next(r for r in s.reqs if r.url.path.endswith("/download"))
+    assert dl.headers["accept"] == "*/*" and dl.url.host == "vip-api.opensubtitles.com"
+    a.download(6)
     assert sum(r.url.path.endswith("/login") for r in s.reqs) == 1  # token cached
+
+
+def test_imdb_without_leading_zeros_and_canonical_query():
+    s = Server()
+    a = adapter(s)
+    s.reqs.clear()
+    a.search_episode(imdb="tt0108778", season=1, episode=2, language="EN")
+    q = s.reqs[-1].url
+    assert q.params["parent_imdb_id"] == "108778"
+    assert str(q.query, "ascii") == (
+        "episode_number=2&languages=en&parent_imdb_id=108778&season_number=1&type=episode"
+    )
 
 
 def test_login_failure_hides_secrets():
@@ -143,12 +170,12 @@ def test_429_retry_after():
     s = Server()
     s.rate_limits = 2
     sleeps = []
-    a = adapter(s, sleep=sleeps.append)
-    assert a.search_episode(parent_tmdb_id=1, season=1, episode=1) is not None
+    a = adapter(s, sleep=sleeps.append, min_interval=0.0)
+    assert a.search_episode(parent_tmdb_id=77, season=1, episode=1) is not None
     assert sleeps == [2.0, 2.0]
     s.rate_limits = 99
     with pytest.raises(OpenSubtitlesError):
-        a.search_episode(parent_tmdb_id=1, season=1, episode=1)
+        a.search_episode(parent_tmdb_id=77, season=1, episode=1)
 
 
 def test_season_quota_then_resume(tmp_path: Path):
@@ -159,7 +186,7 @@ def test_season_quota_then_resume(tmp_path: Path):
     assert rep.downloaded == ["tmdb:1", "tmdb:2"]
     assert rep.quota_stopped == ["tmdb:3", "tmdb:4"]
     assert rep.reset_time == "2026-10-06T00:00:00.000Z"
-    assert (tmp_path / "subs" / "tmdb-1.en.srt").read_text().endswith("hi\n")
+    assert (tmp_path / "subs" / "tmdb-1.en.srt").read_text().endswith("hi\n\n")
     ref = part.episodes[0].subtitles[0]
     assert (ref.source, ref.lang, ref.path) == ("opensubtitles", "en", "subs/tmdb-1.en.srt")
     assert part.provenance and all(p.adapter == "opensubtitles" for p in part.provenance)
@@ -233,3 +260,122 @@ def test_no_secrets_leak(tmp_path: Path):
     )
     for secret in (KEY, USER, PW, TOKEN):
         assert secret not in blob
+
+
+def _search_json(season=1, episode=1, **fd):
+    d = load("search_s1e1.json")
+    for r in d["data"]:
+        r["attributes"]["feature_details"] = {
+            "season_number": season, "episode_number": episode, **fd}
+    return d
+
+
+def _custom(handler):
+    return OpenSubtitlesAdapter(
+        KEY, USER, PW, client=httpx.Client(transport=httpx.MockTransport(handler)),
+        sleep=lambda s: None,
+    )
+
+
+def test_search_redirect_followed():
+    def h(req):
+        if req.url.params.get("languages") == "EN":
+            return httpx.Response(301, headers={"Location": str(req.url.copy_with(
+                params={**req.url.params, "languages": "en"}))})
+        return httpx.Response(200, json=_search_json())
+
+    # an injected client that does not follow redirects by default still follows them
+    c = httpx.Client(transport=httpx.MockTransport(h), follow_redirects=False)
+    a = OpenSubtitlesAdapter(KEY, USER, PW, client=c, sleep=lambda s: None)
+    r = a._send("GET", "https://api.opensubtitles.com/api/v1/subtitles?languages=EN", auth=False)
+    assert r.status_code == 200 and r.request.url.params["languages"] == "en"
+    assert a.search_episode(parent_tmdb_id=1, season=1, episode=1) is not None
+
+
+def test_unfollowed_3xx_is_error_not_not_found():
+    a = _custom(lambda req: httpx.Response(301))  # no Location: cannot follow
+    with pytest.raises(OpenSubtitlesError):
+        a.search_episode(parent_tmdb_id=1, season=1, episode=1)
+
+
+def _dl_handler(link_resp):
+    def h(req):
+        if req.url.path.endswith("/login"):
+            return httpx.Response(200, json=load("login.json"))
+        if req.url.path.endswith("/download"):
+            return httpx.Response(200, json={**load("download_ok.json"),
+                                             "link": "https://dl.example/f.srt"})
+        if req.url.path.endswith("/subtitles"):
+            return httpx.Response(200, json=_search_json())
+        return link_resp
+    return h
+
+
+@pytest.mark.parametrize("resp", [
+    httpx.Response(302),
+    httpx.Response(200, content=b""),
+    httpx.Response(200, content=b"<html><body>Please log in</body></html>"),
+    httpx.Response(200, content=b"1\n00:00:01,000 --> 00:00:02,000\nonly one\n"),
+    httpx.Response(404, content=SRT),
+])
+def test_bad_download_body_refused_and_no_file(tmp_path: Path, resp):
+    a = _custom(_dl_handler(resp))
+    with pytest.raises(OpenSubtitlesError):
+        a.download(5)
+    _, rep = a.fetch_season_subs(bundle(1), tmp_path, season=1)
+    assert list(rep.failed) == ["tmdb:1"] and not rep.downloaded
+    assert list((tmp_path / "subs").glob("*.srt*")) == []
+
+
+def test_download_redirect_followed(tmp_path: Path):
+    def h(req):
+        if req.url.host == "dl.example":
+            return httpx.Response(302, headers={"Location": "https://cdn.example/f.srt"})
+        if req.url.host == "cdn.example":
+            return httpx.Response(200, content=SRT)
+        return _dl_handler(None)(req)
+
+    assert _custom(h).download(5) == SRT
+
+
+def test_wrong_episode_results_dropped():
+    def h(req):
+        return httpx.Response(200, json=_search_json(season=1, episode=2))
+
+    assert _custom(h).search_episode(parent_tmdb_id=1, season=1, episode=1) is None
+    wrong_show = lambda req: httpx.Response(200, json=_search_json(parent_tmdb_id=5))  # noqa: E731
+    assert _custom(wrong_show).search_episode(parent_tmdb_id=1, season=1, episode=1) is None
+    no_details = lambda req: httpx.Response(200, json=load("search_s1e1.json"))  # noqa: E731
+    assert _custom(no_details).search_episode(parent_tmdb_id=1, season=1, episode=1) is None
+    ok = lambda req: httpx.Response(200, json=_search_json(parent_tmdb_id=1))  # noqa: E731
+    assert _custom(ok).search_episode(parent_tmdb_id=1, season=1, episode=1) is not None
+
+
+def test_406_without_quota_body_is_not_quota():
+    def h(req):
+        if req.url.path.endswith("/login"):
+            return httpx.Response(200, json=load("login.json"))
+        return httpx.Response(406, json={"message": "Not Acceptable"})
+
+    a = _custom(h)
+    with pytest.raises(OpenSubtitlesError) as ei:
+        a.download(5)
+    assert not isinstance(ei.value, QuotaExhausted)
+
+
+def test_throttle_spaces_requests():
+    t = [0.0]
+    sleeps = []
+
+    def sleep(d):
+        sleeps.append(d)
+        t[0] += d
+
+    s = Server()
+    a = adapter(s, sleep=sleep, clock=lambda: t[0], min_interval=0.25)
+    for e in (1, 2, 3):
+        a.search_episode(parent_tmdb_id=77, season=1, episode=e)
+    assert sleeps == [0.25, 0.25]
+    t[0] += 1.0  # idle time counts: no extra sleep
+    a.search_episode(parent_tmdb_id=77, season=1, episode=1)
+    assert sleeps == [0.25, 0.25]

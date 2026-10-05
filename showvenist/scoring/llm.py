@@ -242,8 +242,13 @@ class LlmScorer:
         def h(s: str) -> str:
             return hashlib.sha256(s.encode()).hexdigest()
 
+        # everything that shapes the response is part of the key: editing the instructions,
+        # the output schema or the token limit must not serve stale results
+        shape = h(INSTRUCTIONS + json.dumps(LLMResult.model_json_schema(), sort_keys=True)
+                  + str(MAX_TOKENS))
         params = params_hash(
-            model=self.model, prompt=PROMPT_VERSION, effort=self.effort, block=h(block)
+            model=self.model, prompt=PROMPT_VERSION, effort=self.effort, block=h(block),
+            shape=shape,
         )
         return h(excerpt), params
 
@@ -281,7 +286,10 @@ class LlmScorer:
             "usage": usage_dict(resp.usage),
             "cached": False,
         }
-        self._cache_put(block, excerpt, rec)
+        # a refusal is a stable answer; a response cut off by max_tokens (or otherwise empty)
+        # is not, so it is not cached
+        if rec["stop_reason"] == "refusal" or (parsed and rec["stop_reason"] != "max_tokens"):
+            self._cache_put(block, excerpt, rec)
         return rec
 
     # -- scoring
@@ -351,7 +359,9 @@ class LlmScorer:
             if self.send is not None and i not in self.send:
                 continue
             results = self._score_file(i, f, ctx, cands)
-            if not results:
+            # spec §10.2/§11.1: a refusal or failed call leaves the file in the base regime, and
+            # one order alone loses the list-position bias correction: require every expected order
+            if not results or len(results) < len(self._orders()):
                 continue
             out.available[i] = True
             out.llr[i, :] = floor  # columns not shown

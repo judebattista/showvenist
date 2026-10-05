@@ -7,6 +7,7 @@ from collections import Counter
 
 import numpy as np
 
+from showvenist.scoring.names import series_cast_tokens
 from showvenist.scoring.text import (
     dialogue_text,
     has_dialogue,
@@ -27,12 +28,17 @@ class GuestScorer:
         F, E = len(files), ctx.n_candidates
         res = ScoreResult.empty(F, E)
         lang = ctx.language
+        series = series_cast_tokens(ctx.bundle)
         per_ep: list[set[str]] = []
         for c in ctx.candidates:
             toks: set[str] = set()
             for g in c.episode.guest_cast:
                 for part in name_parts(g.character):
-                    toks.update(t for t in name_tokens(part) if not is_dictionary_word(t, lang))
+                    toks.update(
+                        t
+                        for t in name_tokens(part)
+                        if t not in series and not is_dictionary_word(t, lang)
+                    )
             per_ep.append(toks)
         df = Counter(t for s in per_ep for t in s)
         idf = {t: math.log(E / n) for t, n in df.items()}

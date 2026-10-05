@@ -36,3 +36,15 @@ def test_cast_name_cues_ignored():
         ep.llm_cues = _cues(names=["Zorblax"] if k == 0 else [], terms=[f"term{'x' * k}"])
     res = CuesScorer().score([make_file(lines=["zorblax zorblax"])], make_ctx(b))
     assert not res.llr.any()
+
+
+def test_series_cast_cue_names_get_no_credit():
+    from showvenist.bundle.schema import CastEntry
+
+    b = make_bundle(6)
+    b.episodes[0].llm_cues = _cues(names=["Zorblax"], terms=["submarine"])
+    f = make_file(lines=["Zorblax and the submarine"])
+    assert "zorblax" in CuesScorer().score([f], make_ctx(b)).notes[(0, 0)]["terms"]
+    b.series_cast = [CastEntry(actor="Some Body", character="Zorblax")]
+    notes = CuesScorer().score([f], make_ctx(b)).notes.get((0, 0), {})
+    assert "zorblax" not in notes.get("terms", [])

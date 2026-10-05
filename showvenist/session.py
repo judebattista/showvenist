@@ -9,6 +9,11 @@ assignment; no disc blocks, no ordering detection, no history prior).
     s.pin(path, "S01E03")     # or "extra"; re-solves
     s.unpin(path)
 
+    # optional LLM pass (§10.2 "Which files are sent"); the caller checks the cost first
+    llm.send = s.llm_targets("auto")      # after a first solve: the files below high
+    cost = llm.estimate_cost(s.files, s.context())
+    s.apply_llm(llm)                      # adds its evidence and re-solves
+
 No matching logic lives outside this module and the modules it calls.
 """
 
@@ -333,6 +338,29 @@ class Session:
             pins=pins,
         )
         return self.solution
+
+    # ---- LLM pass (§10.2) ------------------------------------------------------------------
+
+    def llm_targets(self, mode: str) -> list[int]:
+        """Indices of the primary files the LLM scorer is sent: `all` = every file; `auto` =
+        files below high in the solve without the LLM (solving first if needed); `off` = none."""
+        if mode == "off":
+            return []
+        if mode == "all":
+            return list(range(len(self.files)))
+        if mode != "auto":
+            raise ValueError(f"unknown LLM mode {mode!r} (off, auto, all)")
+        sol = self.solution or self.solve()
+        return [i for i, c in enumerate(sol.confidences) if c.level != "high"]
+
+    def apply_llm(self, llm: Scorer) -> Solution:
+        """Score with `llm` (its own `send` set decides which files) and re-solve. The other
+        scorers' results are kept, not recomputed."""
+        if self.results is None:
+            self.score()
+        assert self.results is not None
+        self.results = {**self.results, llm.name: llm.score(self.files, self.context())}
+        return self.solve()
 
     def pin(self, file: Path | str | int, episode: str | int | Candidate) -> Solution:
         """Fix `file` to an episode (id, `S01E05` label in this ordering, candidate index or
