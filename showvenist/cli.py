@@ -110,6 +110,32 @@ def bundle_check(
     typer.echo(render(quality_report(bundle, bundle_path(show, root))))
 
 
+@app.command("inspect")
+def inspect_cmd(
+    file: Path = typer.Argument(..., exists=True, dir_okay=False, help="Media file"),
+    show: str | None = typer.Option(None, "--show", help="Bundle slug (vocabulary, language)"),
+    language: str = typer.Option("en", "--language"),
+    root: Path | None = typer.Option(None, "-o", help="Bundle root directory"),
+) -> None:
+    """Dump the extracted dialogue and signals for one file (debugging)."""
+    from showvenist.analysis.cache import AnalysisCache
+    from showvenist.analysis.inspect import inspect_file
+    from showvenist.bundle.store import load_bundle
+    from showvenist.config import cache_dir, load_config
+
+    vocab: set[str] = set()
+    if show:
+        from showvenist.analysis.subtitles import normalize
+
+        b = load_bundle(show, root)
+        language = b.show.language
+        for e in b.episodes:
+            vocab.update(normalize(" ".join([e.title, *(s.text for s in e.synopses)])).split())
+    cache_dir().mkdir(parents=True, exist_ok=True)
+    cache = AnalysisCache(cache_dir() / "analysis.db")
+    typer.echo(inspect_file(file, language, vocab, load_config().analysis, cache))
+
+
 if __name__ == "__main__":
     app()
 
