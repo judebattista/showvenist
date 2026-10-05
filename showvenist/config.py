@@ -44,13 +44,34 @@ class LlmConfig(_Section):
     scope: str = "disc"  # disc | season
 
 
+class LlmWeights(_Section):
+    """[weights.llm]: files the LLM has scored (§11.1)."""
+
+    duration: float = 1.0
+    title: float = 1.0
+    refsubs: float = 1.0
+    llm: float = 1.0
+
+
+class WeightsConfig(_Section):
+    """[weights]: base regime; `llm` holds the LLM-regime weights. Written by `eval --fit`."""
+
+    duration: float = 1.0
+    title: float = 1.0
+    refsubs: float = 1.0
+    synopsis: float = 1.0
+    guests: float = 1.0
+    cues: float = 1.0
+    llm: LlmWeights = Field(default_factory=LlmWeights)
+
+
 class Config(_Section):
     tmdb: TmdbConfig = Field(default_factory=TmdbConfig)
     opensubtitles: OpenSubtitlesConfig = Field(default_factory=OpenSubtitlesConfig)
     naming: NamingConfig = Field(default_factory=NamingConfig)
     analysis: AnalysisConfig = Field(default_factory=AnalysisConfig)
     llm: LlmConfig = Field(default_factory=LlmConfig)
-    weights: dict = Field(default_factory=dict)
+    weights: WeightsConfig = Field(default_factory=WeightsConfig)
 
 
 def _xdg(var: str, default: str) -> Path:
