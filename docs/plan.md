@@ -194,4 +194,4 @@ Each is decided at the point named, not before.
 |---|---|---|---|
 | 1 | Run M1 and M2 in parallel | **Decided 2026-10-05: yes** | M2 needs only two values from M1: the bundle's language and a vocabulary for OCR quality, fixed in the M2 contract. In Beads M2 is not blocked by M1; M3 is blocked by both |
 | 2 | The LLM scorer's default clamp (spec §9.2) | **Decided 2026-10-05: spec decision 40** | Evidence is `logit(p_j) + log(n−1)`, p clipped to [0.01, 0.99], weight 1; `p_none` is not evidence in v1. Analysis: `spike/clamp.py`. The M3 contract implements it |
-| 3 | Raw rips labeled "episode, number unknown" | M3 contract | They can count toward unmatched precision and recall, but not toward top-1 |
+| 3 | Raw rips labeled "episode, number unknown" | **Decided 2026-10-05: spec decision 41** | Label `episode?`; scored only on provable errors (extra at high, or an episode a labeled file already holds); a set label in the fit. The eval harness implements it |
