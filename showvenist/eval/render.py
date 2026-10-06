@@ -79,6 +79,48 @@ def _item(r: EvidenceRow, season_key: str, regime: str, names: Iterable[str]) ->
     return None
 
 
+def format_high_errors(labels, decisions, bundles) -> str:
+    """Files whose decision was wrong at high confidence (the cases the 1% bound is about)."""
+    from showvenist.eval.harness import _is_correct
+
+    by_path = {d.path: d for d in decisions}
+    from showvenist.eval.harness import find_ordering
+
+    ep_name = {}
+    for b in bundles.values():
+        for e in b.episodes:
+            ep_name[e.id] = e.title
+
+    def number(show: str, order: str, episode_id: str | None) -> str:
+        b = bundles.get(show)
+        ordering = find_ordering(b, order) if b is not None else None
+        if ordering is None or episode_id is None:
+            return ""
+        for ent in ordering.entries:
+            if ent.episode_id == episode_id:
+                return f"S{ent.season:02d}E{ent.episode:02d} "
+        return ""
+    lines = []
+    for lab in labels:
+        d = by_path.get(lab.row.path)
+        if d is None or d.level != "high" or lab.kind == "episode?":
+            continue
+        if lab.duplicate_set is not None or _is_correct(lab, d):
+            continue
+        want = lab.row.label if lab.kind == "episode" else "extra"
+        got = (
+            number(lab.row.show, lab.row.order, d.episode_id)
+            + repr(ep_name.get(d.episode_id, d.episode_id))
+            if d.episode_id else "extra"
+        )
+        lines.append(
+            f"  {lab.row.path.rsplit('/', 1)[-1]}: labeled {want} ({lab.row.show}), "
+            f"decided {got} at Δ={d.delta:.1f}" if d.delta is not None else
+            f"  {lab.row.path.rsplit('/', 1)[-1]}: labeled {want}, decided {got}"
+        )
+    return "errors at high confidence:\n" + ("\n".join(lines) if lines else "  none")
+
+
 def fit_items(
     rows: Iterable[EvidenceRow],
     season_key: str,

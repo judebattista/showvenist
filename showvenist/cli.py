@@ -351,6 +351,9 @@ def eval_cmd(
     yes: bool = typer.Option(
         False, "--yes", help="Allow the paid LLM calls whose estimated cost is printed"
     ),
+    show_errors: bool = typer.Option(
+        False, "--show-errors", help="List the files that were wrong at high confidence"
+    ),
     ablate: bool = typer.Option(
         False, "--ablate", help="Metrics with each scorer removed in turn (re-solves stored "
         "evidence; nothing is re-analyzed)"
@@ -423,13 +426,19 @@ def eval_cmd(
     def approve(est: float) -> bool:
         return yes or est == 0
 
-    _, result = run_eval(
+    all_decisions, result = run_eval(
         rows, bundles, cfg, dirs, cache, progress=progress, on_group=on_group,
         scorers=_scorers(sig), llm_mode=mode,
         llm_factory=(lambda: _llm_scorer(cfg, cache)) if mode != "off" else None,
         approve=approve,
     )
     typer.echo(format_eval(result))
+    if show_errors:
+        from showvenist.eval.harness import resolve_labels
+        from showvenist.eval.render import format_high_errors
+
+        resolved, _ = resolve_labels(rows, bundles)
+        typer.echo("\n" + format_high_errors(resolved, all_decisions, bundles))
     typer.echo("\n" + format_times(groups))
     refused = [g for g in groups if g.llm_refused]
 
