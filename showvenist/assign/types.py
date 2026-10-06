@@ -23,7 +23,7 @@ from showvenist.scoring.types import FileConfidence
 # Placeholders until tuned by eval in M4 (spec §18): nats.
 UNCLAIMED_PENALTY_DEFAULT = 1.0  # u: a position inside a block that no file claims
 GAP_PENALTY_DEFAULT = 2.0  # g: a position skipped between consecutive blocks
-ORDERING_THRESHOLD_DEFAULT = 4.0  # block total short of basic total by more than this: try others
+ORDERING_THRESHOLD_DEFAULT = 15.0  # block total short of basic total by more than this: try others
 
 
 @dataclass(frozen=True)

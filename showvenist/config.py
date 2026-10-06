@@ -78,7 +78,7 @@ class BlocksConfig(_Section):
 
     unclaimed_penalty: float = 1.0
     gap_penalty: float = 2.0
-    ordering_threshold: float = 4.0
+    ordering_threshold: float = 15.0
 
 
 class Config(_Section):
@@ -134,5 +134,7 @@ def load_config(path: Path | None = None, env: dict[str, str] | None = None) -> 
                 val = val.lower() in ("1", "true", "yes", "on")
             elif isinstance(current, int):
                 val = int(val)
+            elif isinstance(current, float):
+                val = float(val)
             setattr(section, field, val)
     return cfg

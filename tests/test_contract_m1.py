@@ -25,3 +25,8 @@ def test_config_env_overrides_file(tmp_path):
     )
     assert cfg.tmdb.api_key == "env" and cfg.analysis.ocr_workers == 5
     assert load_config(tmp_path / "none.toml", env={}).llm.mode == "off"
+
+
+def test_float_settings_can_be_overridden_by_env():
+    cfg = load_config(None, env={"SHOWVENIST_BLOCKS_ORDERING_THRESHOLD": "12.5"})
+    assert cfg.blocks.ordering_threshold == 12.5
