@@ -250,6 +250,10 @@ def _llm_scorer(cfg, cache):
     )
 
 
+def _has_reference_subtitles(bundle, bundle_dir: Path) -> bool:
+    return any((bundle_dir / s.path).is_file() for e in bundle.episodes for s in e.subtitles)
+
+
 @app.command()
 def identify(
     paths: list[Path] = typer.Argument(..., exists=True, help="Files or directories"),
@@ -331,6 +335,12 @@ def identify(
             sess.apply_llm(scorer)
             typer.echo(f"LLM spend: ${scorer.total_cost_usd:.4f}", err=True)
     report = sess.report()
+    if mode == "off" and not _has_reference_subtitles(bundle, bundle_path(slug, root)):
+        report.notices.append(
+            "No reference subtitles and the LLM is off: nearly every file will need review. "
+            "Add reference subtitles with `showvenist ingest --subs DIR`, or use "
+            "`--llm auto --yes` (the estimated cost is printed first)."
+        )
     typer.echo(to_json(report) if as_json else render_tables(report))
     raise typer.Exit(exit_code(report))
 

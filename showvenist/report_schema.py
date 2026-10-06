@@ -68,3 +68,4 @@ class Report(_M):
     season: int | None = None
     files: list[FileReport] = []
     summary: Summary
+    notices: list[str] = []  # one-line advice for the user (e.g. no evidence source available)

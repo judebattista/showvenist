@@ -239,3 +239,28 @@ def test_eval_llm_guard_and_cost(tmp_path, monkeypatch, no_real_llm):
     assert r.exit_code == 0, r.output
     assert sum(len(c.calls) for c in clients) > 0
     assert "LLM cost: $" in r.stdout
+
+
+def test_identify_without_refsubs_or_llm_prints_the_notice(tmp_path, monkeypatch):
+    root, rips = setup(tmp_path, monkeypatch)
+    # remove the reference subtitles from the stored bundle
+    import json
+
+    f = root / "synth-show-2000" / "show.json"
+    data = json.loads(f.read_text())
+    for e in data["episodes"]:
+        e["subtitles"] = []
+    f.write_text(json.dumps(data))
+    r = runner.invoke(cli.app, ["identify", str(rips), "--show", "synth-show-2000", "-o",
+                                str(root)])
+    assert "nearly every file will need review" in r.output
+    r = runner.invoke(cli.app, ["identify", str(rips), "--show", "synth-show-2000", "-o",
+                                str(root), "--json"])
+    assert json.loads(r.stdout[r.stdout.index("{"):])["notices"]
+
+
+def test_identify_with_refsubs_has_no_notice(tmp_path, monkeypatch):
+    root, rips = setup(tmp_path, monkeypatch)
+    r = runner.invoke(cli.app, ["identify", str(rips), "--show", "synth-show-2000", "-o",
+                                str(root)])
+    assert "nearly every file" not in r.output

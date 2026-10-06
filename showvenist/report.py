@@ -213,6 +213,8 @@ def render_tables(report: Report) -> str:
     console.print(
         f"{s.files} files: {s.high} high, {s.medium} medium, {s.low} low; {s.extras} extras"
     )
+    for note in report.notices:
+        console.print(note)
     return buf.getvalue()
 
 
