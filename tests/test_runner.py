@@ -198,3 +198,88 @@ def test_run_eval_llm_needs_approval_and_records_cost(corpus, tmp_path):
     assert result.overall.top1 == 1.0
     with pytest.raises(ValueError):
         run_eval(rows, bundles, Config(), bdirs, None, llm_mode="sometimes")
+
+
+# ---- disc blocks in eval (M4): discs from title tags, named files are unlabeled input --------
+
+
+def tagged_mkv(path, minutes, lines, title):
+    """make_episode_mkv with an MKV title tag (MakeMKV sets it to the disc name, §5.1)."""
+    from tests.fixtures.textsubs import make_mkv_with_text_subs
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    dur = minutes * 60
+    cues, t, n = [], 2.0, 0
+    while t + 2 < dur:
+        cues.append((t, t + 2.0, lines[n % len(lines)]))
+        t, n = t + 5.0, n + 1
+    make_mkv_with_text_subs(path, cues, duration_s=dur, title=title)
+    return path
+
+
+@pytest.fixture(scope="module")
+def flattened(tmp_path_factory):
+    """A flattened season (no disc folders) of files named like episodes, whose title tags
+    give the disc: E1, E2 on disc 1; E3, E4 on disc 2."""
+    root = tmp_path_factory.mktemp("flat")
+    bdir = root / "bundles" / SLUG
+    bundle = write_refs(synth_bundle(), bdir)
+    rows = []
+    for k, minutes in enumerate((8, 11, 14, 17)):
+        disc = 1 if k < 2 else 2
+        p = tagged_mkv(root / "Synth Show" / f"synth_s01e0{k + 1}.mkv", minutes,
+                       dialogue_for(k), f"SYNTH SHOW SEASON 1 DISC {disc}")
+        rows.append(ManifestRow(path=str(p), show=SLUG, label=f"S01E0{k + 1}"))
+    return rows, {SLUG: bundle}, {SLUG: bdir}
+
+
+def test_eval_discs_from_title_tags_reach_the_session(flattened, tmp_path):
+    from showvenist.session import FLAG_NAMED
+
+    rows, bundles, bdirs = flattened
+    groups = []
+    decisions, result = run_eval(rows, bundles, Config(), bdirs,
+                                 AnalysisCache(tmp_path / "a.db"), on_group=groups.append)
+    (g,) = groups
+    sn = g.session.season_node
+    assert [d.key for d in sn.discs] == ["tag:disc 1", "tag:disc 2"]
+    assert [d.number for d in sn.discs] == [1, 2] and not sn.loose
+    assert all(f.tag_disc is not None and f.tag_disc.source == "tag"
+               for d in sn.discs for f in d.files)
+    # named files are analyzed as unlabeled input, never pins
+    assert all(f.named is None for d in sn.discs for f in d.files)
+    assert len(g.session.files) == 4 and not g.session.named and not g.solution.pins
+    assert all(FLAG_NAMED not in g.session.flags(i) for i in range(4))
+    assert g.solution.used_blocks and g.n_discs == 2
+    assert set(g.solution.blocks.values()) == {(0, 2), (2, 4)}
+    assert result.overall.top1 == 1.0
+    # re-solving the stored evidence goes through the block model as well
+    from showvenist.eval.runner import group_decisions
+
+    assert group_decisions(g) == {d.path: d for d in decisions}
+
+    groups.clear()
+    _, plain = run_eval(rows, bundles, Config(), bdirs, AnalysisCache(tmp_path / "a.db"),
+                        on_group=groups.append, use_blocks=False)
+    assert not groups[0].solution.used_blocks and plain.overall.top1 == 1.0
+
+
+def test_group_tree_disc_sources():
+    from showvenist.eval.runner import group_tree
+    from showvenist.eval.types import ResolvedLabel
+
+    def lab(path, disc=""):
+        return ResolvedLabel(ManifestRow(path=path, show=SLUG, label="extra", disc=disc), "extra")
+
+    tags = {"/x/a.mkv": "SHOW S1 DISC 2", "/x/Disc 1/b.mkv": "SHOW S1 DISC 3",
+            "/x/c.mkv": "SHOW S1 DISC 2", "/x/d.mkv": None, "/x/e.mkv": "SHOW DISC 4"}
+    labels = [lab("/x/a.mkv"), lab("/x/Disc 1/b.mkv"), lab("/x/c.mkv"), lab("/x/d.mkv"),
+              lab("/x/e.mkv", disc="3")]
+    tree = group_tree(labels, 1, lambda p: tags[str(p)])
+    (s,) = tree.seasons
+    assert [(d.number, [f.path.name for f in d.files]) for d in s.discs] == [
+        (1, ["b.mkv"]),  # folder wins over the tag
+        (2, ["a.mkv", "c.mkv"]),  # one disc per tag label
+        (3, ["e.mkv"]),  # the manifest's disc column wins over everything
+    ]
+    assert [f.path.name for f in s.loose] == ["d.mkv"]

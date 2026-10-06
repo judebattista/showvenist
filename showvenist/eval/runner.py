@@ -2,9 +2,19 @@
 
     decisions, result = run_eval(rows, bundles, config, bundle_dirs, cache)
 
-Labeled files are grouped by (show, season); each group is one `Session` (flat list, basic
-assignment) in the ordering its labels are written in. The history prior is always off. Files
-that can't be read become `Problem`s; the run continues.
+Labeled files are grouped by (show, season); each group is one `Session` in the ordering its
+labels are written in. The history prior is always off. Files that can't be read become
+`Problem`s; the run continues.
+
+Disc structure (spec §5.1, §11.5): each group is handed a one-season tree (`group_tree`) whose
+discs come from the manifest's `disc` column, else the file's `Disc N` / `D1` / volume-label
+folder, else the MKV title tag (the library is flattened, but many files keep a disc-level tag).
+With `use_blocks` (the default) the Session solves with the disc block model and ordering
+detection; `use_blocks=False` is the basic assignment (`eval --no-blocks`).
+
+Labeled files are UNLABELED INPUT: their tree nodes carry `named=None`, so a file whose name
+parses as an episode (`show_s01e02.mkv`) is analyzed and scored, never taken as a pin (§5.5's
+ground-truth rule is identify's, not eval's).
 
 Evidence for the weight fit (`eval/fit.py`)
 -------------------------------------------
@@ -28,6 +38,7 @@ Pass `on_group=` to receive a `GroupRun` per solved group, then call
 
 from __future__ import annotations
 
+import os
 import re
 import time
 from collections import Counter, defaultdict
@@ -40,9 +51,10 @@ import numpy as np
 
 from showvenist.analysis.types import AnalysisCache
 from showvenist.assign.basic import assign_basic
+from showvenist.assign.blocks import block_confidence, solve_blocks
 from showvenist.assign.confidence import confidence
 from showvenist.bundle.schema import Bundle
-from showvenist.config import Config, WeightsConfig
+from showvenist.config import Config, HierarchyConfig, WeightsConfig
 from showvenist.eval.harness import compute_metrics, find_ordering, resolve_labels
 from showvenist.eval.types import (
     EvalResult,
@@ -53,7 +65,9 @@ from showvenist.eval.types import (
     ResolvedLabel,
 )
 from showvenist.fusion import fuse
-from showvenist.scoring.types import FileConfidence, Regime, Scorer
+from showvenist.hierarchy.parse import parse_disc
+from showvenist.hierarchy.types import DiscNode, DiscRef, FileNode, SeasonNode, ShowNode
+from showvenist.scoring.types import Assignment, FileConfidence, Regime, Scorer
 from showvenist.session import Session, Solution, bundle_vocabulary
 
 # progress(done, total, path, error) over every labeled file of the run
@@ -86,6 +100,11 @@ class GroupRun:
     @property
     def key(self) -> str:
         return f"{self.show}-S{self.season or 0:02d}"
+
+    @property
+    def n_discs(self) -> int:
+        """Discs of the group with at least one analyzed file (block model input)."""
+        return sum(1 for d in self.solution.discs if d.files)
 
 
 @dataclass
@@ -135,6 +154,63 @@ def _ordering_key(bundle: Bundle, name: str) -> str | None:
     if o is None:
         return None
     return next(k for k, v in bundle.orderings.items() if v is o)
+
+
+def _title_tag(path: Path, cache: AnalysisCache | None) -> str | None:
+    from showvenist.analysis.probe import probe
+
+    try:
+        return probe(path, cache).title_tag
+    except Exception:  # noqa: BLE001 - unreadable: the analysis reports it
+        return None
+
+
+def group_tree(
+    labels: Sequence[ResolvedLabel],
+    season: int | None,
+    tag_of: Callable[[Path], str | None],
+    hierarchy: HierarchyConfig | None = None,
+) -> ShowNode:
+    """A one-season tree for a group of labeled files (module doc). Disc identity, in order:
+    the manifest's `disc` column, the parent folder's name, the MKV title tag. Files with none
+    are loose. Every FileNode has `named=None` (eval input is unlabeled)."""
+    pats = hierarchy.disc_patterns if hierarchy is not None else None
+    node = SeasonNode(season, None)
+    discs: dict[str, DiscNode] = {}
+    for lab in labels:
+        path = Path(lab.row.path)
+        try:
+            st = os.stat(path)
+            size, mtime = st.st_size, st.st_mtime
+        except OSError:
+            size, mtime = 0, 0.0
+        tag = tag_of(path)
+        tag_ref = parse_disc(tag, pats) if tag else None
+        fn = FileNode(path, size, mtime, title_tag=tag,
+                      tag_disc=DiscRef(tag_ref.number, tag_ref.season, tag_ref.label, "tag")
+                      if tag_ref else None, named=None)
+        ref: DiscRef | None = None
+        key = folder = None
+        col = lab.row.disc.strip()
+        if col:
+            ref = parse_disc(col, pats) or DiscRef(int(col) if col.isdigit() else None, None, col)
+            key = f"manifest:{col}"
+        elif (fref := parse_disc(path.parent.name, pats)) is not None:
+            ref, key, folder = fref, str(path.parent), path.parent
+        elif tag_ref is not None:
+            ref = fn.tag_disc
+            key = "tag:" + " ".join(tag_ref.label.split()).casefold()
+        if ref is None or key is None:
+            node.loose.append(fn)
+            continue
+        d = discs.get(key)
+        if d is None:
+            d = discs[key] = DiscNode(
+                key, ref, folder, order_source="number" if ref.number is not None else "name"
+            )
+        d.files.append(fn)
+    node.discs = sorted(discs.values(), key=lambda d: (d.number is None, d.number or 0, d.key))
+    return ShowNode(root=Path("/"), seasons=[node])
 
 
 def evidence_table(
@@ -215,6 +291,8 @@ def run_eval(
     llm_mode: str = "off",
     llm_factory: Callable[[], Any] | None = None,
     approve: Approve | None = None,
+    use_blocks: bool = True,
+    tag_of: Callable[[Path], str | None] | None = None,
 ) -> tuple[list[FileDecision], EvalResult]:
     """Analyze, score and solve every labeled file, then compute the §16.1 metrics.
 
@@ -229,6 +307,9 @@ def run_eval(
     after the first solve its `send` set is chosen, its cost estimated, and it runs only if
     `approve(estimate)` is true (default: only when the estimate is 0, i.e. all cached).
     Actual spend lands in `cost_usd` (overall and per season).
+
+    Blocks: every group gets a disc tree (`group_tree`); `use_blocks=False` solves without
+    the block model. `tag_of(path)` reads the MKV title tag (default: the cached probe).
     """
     if llm_mode not in ("off", "auto", "all"):
         raise ValueError(f"unknown LLM mode {llm_mode!r} (off, auto, all)")
@@ -251,6 +332,7 @@ def run_eval(
     decisions: dict[str, FileDecision] = {}
     kept: list[ResolvedLabel] = []
     cost: dict[str, float] = defaultdict(float)
+    read_tag = tag_of or (lambda p: _title_tag(p, cache))
 
     for (show, season), labs in sorted(groups.items(), key=lambda kv: (kv[0][0], kv[0][1] or 0)):
         bundle = bundles[show]
@@ -264,9 +346,11 @@ def run_eval(
                 raise ValueError(f"unknown ordering {orders.most_common(1)[0][0]!r}")
             if show not in vocab:
                 vocab[show] = bundle_vocabulary(bundle, bdir)
+            tree = group_tree(labs, season, read_tag, config.hierarchy)
             session = Session(
                 bundle, bdir, config, ordering=order, season=season, cache=cache,
                 scorers=list(scorers) if scorers is not None else None, vocabulary=vocab[show],
+                tree=tree, use_blocks=use_blocks,
             )
         except Exception as e:
             for lab in labs:
@@ -347,8 +431,10 @@ def group_decisions(
     drop: Collection[str] = (),
 ) -> dict[str, FileDecision]:
     """Re-fuse a solved group's stored raw evidence (minus the `drop`ped scorers, with
-    `weights` or the config's) and re-solve. Keyed by manifest path, duplicates included.
-    Nothing is re-analyzed or re-scored."""
+    `weights` or the config's) and re-solve the way the group was solved: with the disc block
+    model in the ordering it ended in when the solve used blocks (ordering detection is not
+    re-run), else the basic assignment. Keyed by manifest path, duplicates included. Nothing
+    is re-analyzed or re-scored."""
     sol = group.solution
     w = group.session.config.weights if weights is None else weights
     results = {k: v for k, v in sol.results.items() if k not in drop}
@@ -356,8 +442,14 @@ def group_decisions(
         fused = fuse(results, w)
     else:
         fused = fuse({}, w, history_penalty=np.zeros((len(sol.files), len(sol.candidates))))
-    assignment = assign_basic(fused.S)
-    confs = confidence(fused.S, assignment)
+    if sol.used_blocks and sol.discs and not sol.pins:
+        params = group.session.block_params
+        bs = solve_blocks(fused.S, sol.discs, sol.loose, params)
+        assignment = Assignment(list(bs.column), bs.total)
+        confs = block_confidence(fused.S, sol.discs, bs, sol.loose, params)
+    else:
+        assignment = assign_basic(fused.S)
+        confs = confidence(fused.S, assignment)
     by_path = {Path(lab.row.path): lab for lab in group.labels}
     out: dict[str, FileDecision] = {}
     for path, d in _decisions(group.session, sol, assignment.column, confs).items():

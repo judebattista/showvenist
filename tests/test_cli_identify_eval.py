@@ -1,6 +1,8 @@
 """identify and eval through the CLI on tiny synthetic MKVs (no real media, no network)."""
 
 import json
+import os
+import time
 
 import pytest
 from typer.testing import CliRunner
@@ -19,9 +21,17 @@ from tests.test_session import (
 runner = CliRunner()
 
 
+def age(*paths, seconds=3600):
+    """Back-date files so the readiness check (§5.2) sees them as finished rips."""
+    then = time.time() - seconds
+    for p in paths:
+        os.utime(p, (then, then))
+
+
 def setup(tmp_path, monkeypatch):
     for var in ("XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME"):
         monkeypatch.setenv(var, str(tmp_path / var))
+    monkeypatch.setattr(cli, "READINESS_SETTLE_SECONDS", 0.0)
     root = tmp_path / "bundles"
     bundle = synth_bundle()
     slug_dir = bundle_path("synth-show-2000", root)
@@ -30,8 +40,8 @@ def setup(tmp_path, monkeypatch):
     rips = tmp_path / "rips" / "Season 1"
     rips.mkdir(parents=True)
     runtimes = [8, 11]
-    for k in range(2):
-        make_episode_mkv(rips / f"s01e0{k + 1}.mkv", runtimes[k], dialogue_for(k))
+    for k in range(2):  # not named like episodes: these are analyzed (§5.5)
+        age(make_episode_mkv(rips / f"t0{k + 1}.mkv", runtimes[k], dialogue_for(k)))
     return root, rips
 
 
@@ -46,7 +56,7 @@ def test_identify_json_and_exit_code(tmp_path, monkeypatch):
         f["path"].rsplit("/", 1)[-1]: f["decision"]["episode"]["episode"]
         for f in report["files"]
     }
-    assert got == {"s01e01.mkv": 1, "s01e02.mkv": 2}
+    assert got == {"t01.mkv": 1, "t02.mkv": 2}
 
 
 def test_identify_unknown_show_fails(tmp_path, monkeypatch):
@@ -60,8 +70,8 @@ def test_eval_prints_metrics_and_fit(tmp_path, monkeypatch):
     manifest = tmp_path / "m.csv"
     manifest.write_text(
         "path,show,label,order,disc\n"
-        f"{rips}/s01e01.mkv,synth-show-2000,S01E01,aired,\n"
-        f"{rips}/s01e02.mkv,synth-show-2000,S01E02,aired,\n"
+        f"{rips}/t01.mkv,synth-show-2000,S01E01,aired,\n"
+        f"{rips}/t02.mkv,synth-show-2000,S01E02,aired,\n"
     )
     r = runner.invoke(cli.app, ["eval", str(manifest), "-o", str(root)])
     assert r.exit_code == 0, r.output
@@ -105,9 +115,9 @@ def test_identify_episode_ranges_and_errors(tmp_path, monkeypatch, no_real_llm):
     root, rips = setup(tmp_path, monkeypatch)
     r = _ident(root, rips, "--season", "1", "--episodes", "1-2")
     assert r.exit_code in (0, 2), r.output
-    assert _episodes(r) == {"s01e01.mkv": 1, "s01e02.mkv": 2}
+    assert _episodes(r) == {"t01.mkv": 1, "t02.mkv": 2}
     r = _ident(root, rips, "--episodes", "S01E01,S01E02")
-    assert _episodes(r) == {"s01e01.mkv": 1, "s01e02.mkv": 2}
+    assert _episodes(r) == {"t01.mkv": 1, "t02.mkv": 2}
     for args in (["--episodes", "1-2"], ["--episodes", "zz"],
                  ["--season", "1", "--episodes", "9-12"],  # empty scope: Session ValueError
                  ["--season", "7"]):
@@ -121,7 +131,7 @@ def test_identify_report_and_signals(tmp_path, monkeypatch, no_real_llm):
     base = ["identify", str(rips), "--show", "synth-show-2000", "-o", str(root)]
     r = runner.invoke(cli.app, [*base, "--report"])
     assert r.exit_code in (0, 2), r.output
-    assert "s01e01.mkv" in r.stdout and not r.stdout.lstrip().startswith("{")
+    assert "t01.mkv" in r.stdout and not r.stdout.lstrip().startswith("{")
     assert runner.invoke(cli.app, [*base, "--report", "--json"]).exit_code == 1
     r = _ident(root, rips, "--signals", "duration")
     assert r.exit_code in (0, 2), r.output
@@ -151,7 +161,7 @@ def test_identify_llm_needs_yes(tmp_path, monkeypatch, no_real_llm):
     assert r.exit_code in (0, 2), r.output
     assert len(clients) == 1 and len(clients[0].calls) == 4  # two files, both orders
     assert "LLM spend" in r.stderr
-    assert _episodes(r) == {"s01e01.mkv": 1, "s01e02.mkv": 2}
+    assert _episodes(r) == {"t01.mkv": 1, "t02.mkv": 2}
     # --signals without llm turns the LLM off whatever --llm says
     r = _ident(root, rips, "--llm", "all", "--signals", "-llm")
     assert r.exit_code in (0, 2) and len(clients) == 1
@@ -264,3 +274,36 @@ def test_identify_with_refsubs_has_no_notice(tmp_path, monkeypatch):
     r = runner.invoke(cli.app, ["identify", str(rips), "--show", "synth-show-2000", "-o",
                                 str(root)])
     assert "nearly every file" not in r.output
+
+
+# ---- eval: blocks vs. no blocks (M4) ------------------------------------------------------------
+
+
+def test_eval_compare_blocks_and_no_blocks(tmp_path, monkeypatch, no_real_llm):
+    from tests.test_runner import tagged_mkv
+
+    for var in ("XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME"):
+        monkeypatch.setenv(var, str(tmp_path / var))
+    root = tmp_path / "bundles"
+    slug_dir = bundle_path("synth-show-2000", root)
+    slug_dir.mkdir(parents=True)
+    save_bundle(write_refs(synth_bundle(), slug_dir), root)
+    lines = ["path,show,label,order,disc"]
+    for k, minutes in enumerate((8, 11, 14, 17)):
+        p = tagged_mkv(tmp_path / "lib" / "Synth Show" / f"synth_s01e0{k + 1}.mkv", minutes,
+                       dialogue_for(k), f"SYNTH SHOW DISC {1 if k < 2 else 2}")
+        lines.append(f"{p},synth-show-2000,S01E0{k + 1},aired,")
+    manifest = tmp_path / "m.csv"
+    manifest.write_text("\n".join(lines) + "\n")
+    base = ["eval", str(manifest), "-o", str(root)]
+    r = runner.invoke(cli.app, [*base, "--compare-blocks", "--ablate"])
+    assert r.exit_code == 0, r.output
+    out = r.stdout
+    assert "with disc blocks" in out and "without blocks (--no-blocks)" in out
+    assert "blocks vs. no blocks per season" in out
+    row = next(ln for ln in out.splitlines() if ln.startswith("synth-show-2000-S01 ") and
+               "+" in ln)
+    assert row.split()[1] == "2"  # two discs from the title tags
+    assert "all signals" in out
+    assert runner.invoke(cli.app, [*base, "--no-blocks"]).exit_code == 0
+    assert runner.invoke(cli.app, [*base, "--no-blocks", "--compare-blocks"]).exit_code == 1

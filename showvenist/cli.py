@@ -254,20 +254,272 @@ def _has_reference_subtitles(bundle, bundle_dir: Path) -> bool:
     return any((bundle_dir / s.path).is_file() for e in bundle.episodes for s in e.subtitles)
 
 
+# ---- identify: directory input (spec §4.3, §5) ------------------------------------------------
+
+# Readiness (§5.2): seconds between the two stat() calls of the batch. Tests set it to 0.
+READINESS_SETTLE_SECONDS = 1.0
+
+
+def _interactive() -> bool:
+    """Prompts only on a TTY; non-interactive runs fail instead of asking (§5.1)."""
+    try:
+        return sys.stdin.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def _tag_reader(cache) -> Callable[[Path], str | None]:
+    """The MKV title tag (§5.1) via the cached probe; None when the file can't be probed."""
+    from showvenist.analysis.probe import probe
+
+    memo: dict[Path, str | None] = {}
+
+    def tag_of(path: Path) -> str | None:
+        if path not in memo:
+            try:
+                memo[path] = probe(path, cache).title_tag
+            except Exception:  # noqa: BLE001 - unreadable files are reported by the analysis
+                memo[path] = None
+        return memo[path]
+
+    return tag_of
+
+
+def _files_tree(files: list[Path], hcfg, tag_of):
+    """Tree for files named one by one: each file's disc from its folder (else its title
+    tag), its season from the season folder above (else the disc label, else the tag)."""
+    from dataclasses import replace
+
+    from showvenist.hierarchy.parse import parse_disc, parse_named, parse_season, parse_tag_season
+    from showvenist.hierarchy.types import DiscNode, FileNode, SeasonNode, ShowNode
+
+    show = ShowNode(root=files[0].parent)
+    seasons: dict[int | None, SeasonNode] = {}
+    discs: dict[tuple[int | None, str], DiscNode] = {}
+    for f in files:
+        st = f.stat()
+        tag = tag_of(f)
+        node = FileNode(f, st.st_size, st.st_mtime, title_tag=tag,
+                        named=parse_named(f.name, hcfg.named_patterns))
+        tref = parse_disc(tag, hcfg.disc_patterns) if tag else None
+        if tref is not None:
+            node.tag_disc = replace(tref, source="tag")
+        folder = f.parent
+        fref = parse_disc(folder.name, hcfg.disc_patterns)
+        season = parse_season((folder.parent if fref else folder).name, hcfg.season_patterns)
+        if season is None and fref is not None:
+            season = fref.season
+        if season is None and tag:
+            season = parse_tag_season(tag, hcfg.season_patterns)
+        sn = seasons.setdefault(season, SeasonNode(season, None))
+        if fref is not None and tref is not None and None not in (fref.number, tref.number) \
+                and fref.number != tref.number:
+            msg = (f"{folder.name}: folder says disc {fref.number}, title tag says disc "
+                   f"{tref.number} ({tag!r})")
+            if msg not in show.disagreements:
+                show.disagreements.append(msg)
+        ref, key, where = (fref, folder.name, folder) if fref else (
+            node.tag_disc, f"tag:{' '.join(tref.label.split())}" if tref else "", None)
+        if ref is None:
+            sn.loose.append(node)
+            continue
+        d = discs.get((season, key))
+        if d is None:
+            d = discs[(season, key)] = DiscNode(
+                key, ref, where, order_source="number" if ref.number is not None else "name")
+            sn.discs.append(d)
+        d.files.append(node)
+    show.seasons = list(seasons.values())
+    return show
+
+
+def _input_tree(paths: list[Path], hcfg, tag_of):
+    """One tree over every PATH: directories through hierarchy.parse.build_tree, plain files
+    through `_files_tree`; seasons with the same number are merged."""
+    from showvenist.hierarchy.parse import build_tree
+    from showvenist.hierarchy.types import ShowNode
+
+    trees = [build_tree(p, config=hcfg, tag_of=tag_of) for p in paths if p.is_dir()]
+    files = [p for p in paths if not p.is_dir()]
+    if files:
+        trees.append(_files_tree(files, hcfg, tag_of))
+    if len(trees) == 1:
+        return trees[0]
+    out = ShowNode(root=trees[0].root, name=next((t.name for t in trees if t.name), None))
+    by_num: dict = {}
+    for t in trees:
+        out.problems += t.problems
+        out.disagreements += t.disagreements
+        for s in t.seasons:
+            have = by_num.get(s.number)
+            if have is None:
+                by_num[s.number] = s
+                out.seasons.append(s)
+                continue
+            seen = {d.key: d for d in have.discs}
+            for d in s.discs:
+                if d.key in seen:
+                    known = {f.path for f in seen[d.key].files}
+                    seen[d.key].files += [f for f in d.files if f.path not in known]
+                else:
+                    have.discs.append(d)
+            known = {f.path for f in have.loose}
+            have.loose += [f for f in s.loose if f.path not in known]
+    for s in out.seasons:
+        s.discs.sort(key=lambda d: (d.number is None, d.number or 0, d.key))
+    out.seasons.sort(key=lambda s: (s.number is None, s.number or 0))
+    return out
+
+
+def _show_dir(path: Path, hcfg) -> Path:
+    """The show folder above PATH: up past a disc folder, then past a season folder."""
+    from showvenist.hierarchy.parse import parse_disc, parse_season
+
+    d = path if path.is_dir() else path.parent
+    if parse_disc(d.name, hcfg.disc_patterns) is not None:
+        d = d.parent
+    if parse_season(d.name, hcfg.season_patterns) is not None:
+        d = d.parent
+    return d
+
+
+def _mark_readiness(tree, stable_seconds: float) -> None:
+    from showvenist.hierarchy.readiness import ReadinessChecker
+
+    files = tree.all_files()
+    if not files:
+        return
+    checker = ReadinessChecker(stable_seconds, settle_seconds=READINESS_SETTLE_SECONDS)
+    got = checker.check([f.path for f in files])
+    for f in files:
+        r = got[f.path]
+        f.ready, f.not_ready_reason = r.ready, r.reason
+    for s in tree.seasons:
+        for d in s.discs:
+            d.incomplete = any(not f.ready for f in d.files)
+
+
+def _season_title(n: int | None) -> str:
+    if n is None:
+        return "Season ? (not parsed)"
+    return "Specials (Season 0)" if n == 0 else f"Season {n}"
+
+
+def format_tree(tree, slug: str | None = None, show_name: str | None = None) -> str:
+    """The parsed tree (§5.1): show / season / disc / number of files / files not ready, then
+    the problems and the folder-vs-tag disagreements. Always shown before analysis."""
+    head = f"Show: {show_name or tree.name or tree.root.name}"
+    if slug:
+        head += f"  (bundle {slug})"
+    lines = [head]
+
+    def files_line(fs) -> str:
+        n = len(fs)
+        bad = sum(not f.ready for f in fs)
+        named = sum(f.named is not None for f in fs)
+        out = f"{n} file{'s' if n != 1 else ''}"
+        if named:
+            out += f", {named} named"
+        if bad:
+            out += f", {bad} not ready"
+        return out
+
+    for s in tree.seasons:
+        allf = [f for d in s.discs for f in d.files] + s.loose
+        lines.append(f"  {_season_title(s.number)}: {files_line(allf)}")
+        for d in s.discs:
+            num = f"disc {d.number}" if d.number is not None else "disc ?"
+            if d.folder is not None:
+                src = d.folder.name
+            else:
+                src = f"title tag {d.ref.label!r}" if d.ref else d.key
+            order = "" if d.order_source == "number" else f" [order: {d.order_source}]"
+            lines.append(f"    {num:<8} {src}: {files_line(d.files)}{order}")
+        if s.loose:
+            lines.append(f"    no disc  {files_line(s.loose)}")
+        for f in allf:
+            if not f.ready:
+                lines.append(f"      not ready: {f.path.name} ({f.not_ready_reason})")
+    if tree.problems:
+        lines.append("Problems:")
+        lines += [f"  {p}" for p in tree.problems]
+    if tree.disagreements:
+        lines.append("Folder and title tag disagree (the folder wins):")
+        lines += [f"  {p}" for p in tree.disagreements]
+    return "\n".join(lines)
+
+
+def _resolve_show_choice(show_dir: Path, root: Path | None, interactive: bool):
+    from showvenist.hierarchy.marker import ShowResolutionError, resolve_show
+
+    def pick(cands: list[str]) -> str:
+        for i, c in enumerate(cands, 1):
+            typer.echo(f"  {i}. {c}", err=True)
+        n = typer.prompt("Which bundle", type=typer.IntRange(1, len(cands)), err=True)
+        return cands[n - 1]
+
+    from showvenist.config import bundles_dir
+
+    try:
+        return resolve_show(show_dir, root or bundles_dir(), interactive=interactive,
+                            pick=pick if interactive else None)
+    except (ShowResolutionError, ValueError) as e:
+        _fail(f"identify: {e}")
+
+
+def _ordering_key(bundle, name: str) -> str | None:
+    from showvenist.eval.harness import find_ordering
+
+    o = find_ordering(bundle, name)
+    return None if o is None else next(k for k, v in bundle.orderings.items() if v is o)
+
+
+def _check_disc_order(tree, interactive: bool) -> None:
+    """§5.1 discs without numbers: suggest an order by folder creation time and ask;
+    non-interactive runs fail."""
+    from showvenist.hierarchy.parse import suggest_disc_order
+
+    for s in tree.seasons:
+        if len(s.discs) < 2 or all(d.number is not None for d in s.discs):
+            continue
+        ordered = suggest_disc_order(list(s.discs))
+        names = ", ".join(d.folder.name if d.folder else d.key for d in ordered)
+        msg = (f"{_season_title(s.number)}: discs without usable numbers; suggested order by "
+               f"folder creation time: {names}")
+        if not interactive:
+            _fail(f"identify: {msg}. Rename the disc folders (Disc 1, Disc 2, ...); "
+                  "non-interactive runs never guess.")
+        typer.echo(msg, err=True)
+        if not typer.confirm("Use this order?", default=False, err=True):
+            _fail("identify: disc order not confirmed")
+        s.discs = ordered
+
+
 @app.command()
 def identify(
     paths: list[Path] = typer.Argument(..., exists=True, help="Files or directories"),
-    show: str = typer.Option(..., "--show", help="Bundle slug or show title"),
-    season: int | None = typer.Option(None, "--season"),
+    show: str | None = typer.Option(
+        None, "--show", help="Bundle slug or show title (default: the marker file, a Jellyfin "
+        "[tmdbid-N] hint or the show folder's name)"
+    ),
+    season: int | None = typer.Option(None, "--season", help="Override the season folder"),
     episodes: str | None = typer.Option(
         None, "--episodes", help="Manual scope: 5-8 (within --season) or S02E05,S02E09"
     ),
     order: str | None = typer.Option(
         None, "--order",
-        help="Starting ordering in the bundle. Default: the show's naming_order; bundles and "
-        "marker files don't record one yet, so 'aired'",
+        help="Starting ordering in the bundle (default: the marker's naming_order, else "
+        "'aired'). Ordering detection may still switch to a better-fitting one",
+    ),
+    no_blocks: bool = typer.Option(
+        False, "--no-blocks", help="Solve each season without the disc block model"
     ),
     include_specials: bool = typer.Option(False, "--include-specials"),
+    allow_duplicates: bool = typer.Option(
+        False, "--allow-duplicates",
+        help="Relax at-most-once for duplicate rips. Exact duplicates are already detected; "
+        "near duplicates are not yet (the flag only prints a notice)",
+    ),
     signals: str | None = typer.Option(
         None, "--signals",
         help="Scorers to use, e.g. duration,refsubs, or -cues to drop one "
@@ -282,67 +534,195 @@ def identify(
     as_report: bool = typer.Option(
         False, "--report", help="Print the report (the default: no review TUI yet)"
     ),
-    as_json: bool = typer.Option(False, "--json", help="Emit the versioned JSON report"),
+    as_json: bool = typer.Option(
+        False, "--json",
+        help="Emit the versioned JSON report (a JSON array of reports when several seasons "
+        "are solved)",
+    ),
     root: Path | None = typer.Option(None, "-o", help="Bundle root directory"),
 ) -> None:
-    """Identify files against a show's bundle (report mode; never touches the media)."""
+    """Identify files against a show's bundle (report mode; never touches the media).
+
+    PATHS may be files or Show / Season / Disc folders (§5). The parsed tree is printed to
+    stderr before analysis. Each season in the tree is solved on its own and reported."""
+    import json as _json
+    from dataclasses import replace
+
     from showvenist.analysis.cache import AnalysisCache
     from showvenist.bundle.store import bundle_path
     from showvenist.config import cache_dir, load_config
+    from showvenist.hierarchy.marker import jellyfin_hint, read_marker, suggest_folder_name
     from showvenist.report import exit_code, render_tables, to_json
     from showvenist.session import Session
 
     if as_report and as_json:
         _fail("--report and --json are exclusive")
-    slug, bundle = _resolve_bundle(show, root)
     cfg = load_config()
+    hcfg = cfg.hierarchy
     sig = _parse_signals(signals)
     mode = _llm_mode(llm, cfg, sig)
     try:
         wanted = _parse_episodes(episodes, season) if episodes else None
     except ValueError as e:
         _fail(str(e))
+    interactive = _interactive()
+    paths = [Path(p) for p in paths]
+
+    # --- show, marker ---
+    show_dirs = list(dict.fromkeys(_show_dir(p, hcfg) for p in paths))
+    show_dir = show_dirs[0] if len(show_dirs) == 1 else None
+    if show is None:
+        if show_dir is None:
+            _fail("identify: the paths belong to different show folders "
+                  f"({', '.join(str(d) for d in show_dirs)}); pass --show")
+        choice = _resolve_show_choice(show_dir, root, interactive)
+        slug, source = choice.slug, choice.source
+        _, bundle = _resolve_bundle(slug, root)
+    else:
+        slug, bundle = _resolve_bundle(show, root)
+        source = "--show"
+    marker = None
+    if show_dir is not None:
+        try:
+            marker = read_marker(show_dir)
+        except ValueError as e:
+            _fail(f"identify: {e}")
+    if marker is not None and marker.bundle and marker.bundle != slug:
+        typer.echo(f"marker {show_dir}/.showvenist.toml names bundle {marker.bundle!r}, not "
+                   f"{slug!r}: its settings are ignored", err=True)
+        marker = None
+    if order is None:
+        order = "aired"
+        if marker is not None:
+            key = _ordering_key(bundle, marker.naming_order)
+            if key is None:
+                typer.echo(f"marker naming_order {marker.naming_order!r} is not in the bundle; "
+                           "starting from 'aired'", err=True)
+            else:
+                order = key
+
+    # --- tree, readiness: printed before analysis ---
     cache_dir().mkdir(parents=True, exist_ok=True)
     cache = AnalysisCache(cache_dir() / "analysis.db")
-    try:
-        sess = Session(
-            bundle, bundle_path(slug, root), cfg, ordering=order or "aired", season=season,
-            episodes=wanted, include_specials=include_specials, cache=cache,
-            scorers=_scorers(sig),
-        )
-    except (ValueError, KeyError) as e:
-        _fail(f"identify: {e}")
-    files = _expand(paths)
+    tree = _input_tree(paths, hcfg, _tag_reader(cache))
+    tree.marker = marker
+    _mark_readiness(tree, cfg.analysis.readiness_stable_seconds)
+    shown = format_tree(tree, slug, show_dir.name if show_dir else None)
+    typer.echo(f"{shown}\n  show resolved by: {source}", err=True)
+    if not tree.all_files():
+        _fail("identify: no media files found")
+    if tree.problems:
+        if not interactive:
+            _fail("identify: some folders could not be parsed (see Problems above); "
+                  "non-interactive runs never guess. Rename them, or pass the files on their "
+                  "own.")
+        if not typer.confirm("Continue with those files as loose files (no disc)?",
+                             default=False, err=True):
+            _fail("identify: stopped")
+    _check_disc_order(tree, interactive)
+
+    # --- which seasons to solve ---
+    if season is not None:
+        picked = [s for s in tree.seasons if s.number == season]
+        if not picked:
+            if len(tree.seasons) != 1:
+                _fail(f"identify: no season {season} in the tree")
+            picked = tree.seasons
+        jobs = [(s, season) for s in picked]
+    else:
+        jobs = []
+        for s in tree.seasons:
+            n = s.number
+            if n is None and wanted is None:
+                if not interactive:
+                    _fail(f"identify: can't tell the season of {tree.root} (no season folder or "
+                          "title tag); pass --season. Non-interactive runs never guess.")
+                n = typer.prompt(f"Season of the files under {tree.root}", type=int, err=True)
+            jobs.append((s, n))
 
     def progress(done, total, path, error):
         typer.echo(f"[{done}/{total}] {path.name}" + (f"  ERROR {error}" if error else ""),
                    err=True)
 
-    sess.analyze(files, progress=progress)
-    if not sess.files:
-        _fail("identify: no readable media files")
-    sess.score()
-    sess.solve()
-    if mode != "off":
-        scorer = _llm_scorer(cfg, cache)
-        scorer.send = set(sess.llm_targets(mode))
-        if scorer.send:
-            est = scorer.estimate_cost(sess.files, sess.context())
-            typer.echo(f"LLM ({mode}): {len(scorer.send)} file(s) to send, estimated "
-                       f"${est:.4f} (cached responses are free)", err=True)
-            if est > 0 and not yes:
-                _fail("Not sending: re-run with --yes to allow these paid API calls.")
-            sess.apply_llm(scorer)
-            typer.echo(f"LLM spend: ${scorer.total_cost_usd:.4f}", err=True)
-    report = sess.report()
-    if mode == "off" and not _has_reference_subtitles(bundle, bundle_path(slug, root)):
-        report.notices.append(
-            "No reference subtitles and the LLM is off: nearly every file will need review. "
-            "Add reference subtitles with `showvenist ingest --subs DIR`, or use "
-            "`--llm auto --yes` (the estimated cost is printed first)."
-        )
-    typer.echo(to_json(report) if as_json else render_tables(report))
-    raise typer.Exit(exit_code(report))
+    has_refs = _has_reference_subtitles(bundle, bundle_path(slug, root))
+    folder_hint = None
+    if show_dir is not None and jellyfin_hint(show_dir.name) is None and bundle.show.ids.tmdb:
+        folder_hint = suggest_folder_name(bundle.show.title, bundle.show.year,
+                                          bundle.show.ids.tmdb)
+    reports = []
+    idle_codes: list[int] = []  # seasons with nothing to solve (all named or not ready)
+    for snode, num in jobs:
+        sub = replace(tree, seasons=[snode])
+        try:
+            sess = Session(
+                bundle, bundle_path(slug, root), cfg, ordering=order, season=num,
+                episodes=wanted, include_specials=include_specials or num == 0, cache=cache,
+                scorers=_scorers(sig), tree=sub, use_blocks=not no_blocks, marker=marker,
+            )
+        except (ValueError, KeyError) as e:
+            _fail(f"identify: {e}")
+        if marker is not None:
+            sess.language = marker.language  # the rips' subtitle language (§5.4)
+        if len(jobs) > 1:
+            typer.echo(f"-- {_season_title(num)}", err=True)
+        sess.analyze(None, progress=progress)
+        if not sess.files and not sess.named_rows:
+            if not sess.not_ready and not sess.named:
+                _fail(f"identify: {_season_title(num)}: no readable media files")
+            typer.echo(f"{_season_title(num)}: nothing to analyze ({len(sess.not_ready)} not "
+                       f"ready, {len(sess.named)} named)", err=True)
+            idle_codes.append(2 if sess.not_ready else 0)
+            continue
+        sess.score()
+        sess.solve()
+        if mode != "off" and sess.files:
+            scorer = _llm_scorer(cfg, cache)
+            scorer.send = set(sess.llm_targets(mode))
+            if scorer.send:
+                est = scorer.estimate_cost(sess.files, sess.context())
+                typer.echo(f"LLM ({mode}): {len(scorer.send)} file(s) to send, estimated "
+                           f"${est:.4f} (cached responses are free)", err=True)
+                if est > 0 and not yes:
+                    _fail("Not sending: re-run with --yes to allow these paid API calls.")
+                sess.apply_llm(scorer)
+                typer.echo(f"LLM spend: ${scorer.total_cost_usd:.4f}", err=True)
+        report = sess.report()
+        if mode == "off" and not has_refs:
+            report.notices.append(
+                "No reference subtitles and the LLM is off: nearly every file will need "
+                "review. Add reference subtitles with `showvenist ingest --subs DIR`, or use "
+                "`--llm auto --yes` (the estimated cost is printed first)."
+            )
+        if allow_duplicates:
+            report.notices.append(
+                "--allow-duplicates: near-duplicate detection is not implemented yet; exact "
+                "duplicates are already reported against their first copy."
+            )
+        if folder_hint is not None:
+            report.notices.append(
+                f"Suggestion (not applied): rename the show folder {show_dir.name!r} to "
+                f"{folder_hint!r} so Jellyfin uses the same TMDB entry."
+            )
+        if marker is None and source in ("name", "pick", "tmdbid-hint"):
+            report.notices.append(
+                f"Show resolved from the folder ({source}) as {slug!r}; no marker file was "
+                "written."
+            )
+        reports.append(report)
+
+    done = reports
+    if as_json:
+        if len(done) == 1:
+            typer.echo(to_json(done[0]))
+        else:
+            typer.echo(_json.dumps([_json.loads(to_json(r)) for r in done], indent=2))
+    else:
+        for r in done:
+            if len(done) > 1:
+                typer.echo(f"== {_season_title(r.season)} ==")
+            typer.echo(render_tables(r))
+    codes = [exit_code(r) for r in done] + idle_codes
+    raise typer.Exit(2 if 2 in codes else 0)
 
 
 @app.command("eval")
@@ -376,8 +756,19 @@ def eval_cmd(
         "has labeled extras; 0 = unweighted)",
     ),
     write: bool = typer.Option(False, "--write", help="Write fitted weights to config.toml"),
+    no_blocks: bool = typer.Option(
+        False, "--no-blocks", help="Solve every season without the disc block model"
+    ),
+    compare_blocks: bool = typer.Option(
+        False, "--compare-blocks",
+        help="Also run without blocks and print both metric blocks and the per-season delta",
+    ),
 ) -> None:
-    """Accuracy harness and weight fitting over a labeled manifest (LLM off unless asked)."""
+    """Accuracy harness and weight fitting over a labeled manifest (LLM off unless asked).
+
+    Discs come from the manifest's disc column, the file's disc folder or its MKV title tag;
+    seasons with discs are solved with the block model unless --no-blocks. Labeled files are
+    analyzed as unlabeled input (a name like show_s01e02 is never a pin here)."""
     from showvenist.analysis.cache import AnalysisCache
     from showvenist.bundle.store import bundle_path, load_bundle
     from showvenist.config import cache_dir, config_dir, load_config
@@ -386,6 +777,7 @@ def eval_cmd(
     from showvenist.eval.render import (
         fit_items,
         format_ablation,
+        format_compare_blocks,
         format_eval,
         format_heldout,
         format_times,
@@ -398,6 +790,8 @@ def eval_cmd(
 
     if extras_share is not None and not 0.0 <= extras_share < 1.0:
         _fail("--extras-share must be in [0, 1)")
+    if no_blocks and compare_blocks:
+        _fail("--no-blocks and --compare-blocks are exclusive (the comparison runs both)")
     cfg = load_config()
     sig = _parse_signals(signals)
     mode = _llm_mode(llm, cfg, sig)
@@ -436,13 +830,23 @@ def eval_cmd(
     def approve(est: float) -> bool:
         return yes or est == 0
 
+    llm_factory = (lambda: _llm_scorer(cfg, cache)) if mode != "off" else None
     all_decisions, result = run_eval(
         rows, bundles, cfg, dirs, cache, progress=progress, on_group=on_group,
-        scorers=_scorers(sig), llm_mode=mode,
-        llm_factory=(lambda: _llm_scorer(cfg, cache)) if mode != "off" else None,
-        approve=approve,
+        scorers=_scorers(sig), llm_mode=mode, llm_factory=llm_factory, approve=approve,
+        use_blocks=not no_blocks,
     )
-    typer.echo(format_eval(result))
+    if compare_blocks:
+        # the second run re-reads the analysis cache the first one just filled
+        typer.echo("comparison run without blocks", err=True)
+        _, plain = run_eval(
+            rows, bundles, cfg, dirs, cache,
+            scorers=_scorers(sig), llm_mode=mode, llm_factory=llm_factory, approve=approve,
+            use_blocks=False,
+        )
+        typer.echo(format_compare_blocks(result, plain, {g.key: g.n_discs for g in groups}))
+    else:
+        typer.echo(format_eval(result))
     if show_errors:
         from showvenist.eval.harness import resolve_labels
         from showvenist.eval.render import format_high_errors

@@ -283,3 +283,46 @@ def format_times(groups: Sequence[GroupRun]) -> str:
         f"{tot['solve']:>6.1f}s {tot['total']:>7.1f}s {usd:>8.4f}"
     )
     return "\n".join(lines)
+
+
+def _d(a: float | None, b: float | None) -> str:
+    if a is None or b is None:
+        return "   n/a"
+    return f"{100 * (a - b):+5.1f}"
+
+
+def _errs(m: MetricSet) -> str:
+    p = m.precision_high
+    return "n/a" if p is None else f"{p.errors}/{p.n}"
+
+
+def format_compare_blocks(
+    with_blocks: EvalResult,
+    without: EvalResult,
+    discs: Mapping[str, int] | None = None,
+) -> str:
+    """Blocks vs. no blocks (§16.1, M4 exit): both metric blocks, then per season the two
+    runs side by side with the delta (blocks − no blocks, percentage points). `discs` gives the
+    number of discs per season key; seasons with fewer than two discs are marked, since the
+    block model can only change a multi-disc season."""
+    discs = discs or {}
+    out = ["with disc blocks", format_eval(with_blocks), "", "without blocks (--no-blocks)",
+           format_eval(without), "", "blocks vs. no blocks per season (Δ = blocks − no blocks)"]
+    out.append(
+        f"{'season':<30} {'discs':>5} {'top-1':>13} {'Δ':>6} {'cov@hi':>13} {'Δ':>6} "
+        f"{'errors@high':>15}"
+    )
+    keys = sorted(set(with_blocks.per_season) | set(without.per_season))
+    rows = [("OVERALL", with_blocks.overall, without.overall, None)]
+    rows += [(k, with_blocks.per_season.get(k, MetricSet()), without.per_season.get(k, MetricSet()),
+              discs.get(k)) for k in keys]
+    for name, a, b, n in rows:
+        nd = "" if n is None else str(n) + ("" if n >= 2 else "*")
+        out.append(
+            f"{name:<30} {nd:>5} {_pct(a.top1)} {_pct(b.top1)} {_d(a.top1, b.top1):>6} "
+            f"{_pct(a.coverage_high)} {_pct(b.coverage_high)} "
+            f"{_d(a.coverage_high, b.coverage_high):>6} {_errs(a):>7} {_errs(b):>7}"
+        )
+    if any(n < 2 for n in discs.values()):
+        out.append("* fewer than two discs: the block model cannot change this season much")
+    return "\n".join(out)
