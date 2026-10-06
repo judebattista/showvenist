@@ -567,6 +567,8 @@ Each window is cached separately, so escalating never re-reads.
 
 To be verified with eval: a 24-episode Blu-ray season identified **without escalation in ≤ 5 minutes** on gigabit-class I/O, and faster on the server's local disks. The work is I/O bound. OCR of about 2,000 sampled subtitle images is roughly 3 CPU-minutes, overlapped with reading.
 
+**Measured (M4, Supernatural S2, 22 unique files, PGS, local disks at about 220 MB/s):** 194 s cold (the sequential code took 242 s), 3 s warm. Reading, not OCR, is the cost: a show with sparse subtitles (about 14 cues a minute) never reaches 60 lines early, so each of the three windows reads the full 5 minutes, about 1.9 GB per file. A 24-episode season is then about 46 GB: about 210 s on these disks (meets the target) but about 7 minutes at gigabit speed (misses it).
+
 ---
 
 ## 9. Scoring
@@ -1124,6 +1126,7 @@ The order is chosen to **measure accuracy as early as possible**: the biggest un
 | Performance | Server CPU core count bounds OCR throughput | Measure at M2; process pool |
 | LLM | Invented dialogue cues; list-position bias; calibration of its probabilities; refusals on violent dialogue; price changes | Quote check; positive-only cues; two orders; fitted weight and clamp; refusal = 0 evidence; eval reports real cost |
 | High-confidence errors on adjacent episodes of one arc | On the M3 full run (409 hand-named files, LLM on, no reference subtitles) 4 of 248 high decisions were wrong, all at Δ 5.5–6.2: the Wire S01E02/E03 and S03E05/E06, where the three sampled windows missed the discriminating scenes and the LLM chose the neighbour at p ≈ 0.9 in both candidate orders. In the Δ band 4.6–6.3 about 17% of decisions were wrong (about 20 right, 4 wrong); at Δ ≥ 6.3 none of 228 were. Weight shrinkage does not fix it (it moves right and wrong decisions together) | Known gap, deferred (decision 44). Candidate fixes, for a later iteration: more sampled windows (5 instead of 3) or a full read for files with adjacent-episode competition; tighten HIGH_DELTA toward 6.3 once it holds on data not used to find it; the block model (M4) catches wrong discs but not swaps inside one disc. Until then the user corrects such errors by hand |
+| Reading cost for shows with sparse subtitles | M4 measured about 1.9 GB read per file on Supernatural S2, because every window runs to the 5-minute cap; at gigabit speed a 24-episode season takes about 7 minutes, over the §8.6 target | Deferred: shorter windows or a lower line target for sparse tracks, or reading only the subtitle track's clusters when the container allows. Local disks meet the target |
 | LLM | Haiku 4.5 as a cheaper alternative only caches prompts of ≥ 4,096 tokens | Default is Sonnet 5.5; revisit with eval data |
 | Scope | Whether history needs to be shared or portable across machines | v1: local only |
 | Containers | Official support beyond MKV | v1 tests MKV and MP4 |
