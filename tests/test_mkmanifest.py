@@ -288,3 +288,27 @@ def test_build_rows_relative_paths(tmp_lib):
 
     # Path should be relative and use forward slashes
     assert rows[0][0] == "Show/Season01/show_s01e01.mkv"
+
+
+def test_bundle_slugs_and_sample_merge(tmp_path):
+    from showvenist.eval.mkmanifest import bundle_slugs, merge_sample_labels
+
+    lib, bundles = tmp_path / "lib", tmp_path / "bundles"
+    for d in ("The_West_Wing", "Babylon5", "Mystery"):
+        (lib / d).mkdir(parents=True)
+    for s in ("the-west-wing-1999", "babylon-5-1994"):
+        (bundles / s).mkdir(parents=True)
+        (bundles / s / "show.json").write_text("{}")
+    assert bundle_slugs(bundles, lib) == {
+        "The_West_Wing": "the-west-wing-1999", "Babylon5": "babylon-5-1994"}
+
+    cols = "path,show,label,same_as\n"
+    sample = tmp_path / "sample.csv"
+    sample.write_text(cols + "A/a_t00.mkv,A,extra,\n")
+    full = tmp_path / "full.csv"
+    full.write_text(cols + "A/a_t00.mkv,A,,\nA/b_t00.mkv,A,,A/a_t00.mkv\n")
+    out = tmp_path / "out.csv"
+    assert merge_sample_labels(sample, full, out) == 1
+    from showvenist.eval.mkmanifest import sheet_to_rows
+
+    assert [r[2] for r in sheet_to_rows(out)] == ["extra", "extra"]  # the duplicate inherits

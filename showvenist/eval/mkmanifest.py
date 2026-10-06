@@ -173,6 +173,46 @@ def sheet_to_rows(sheet_csv: Path) -> list[tuple[str, str, str, str, str]]:
     return result
 
 
+def merge_sample_labels(sample_csv: Path, full_csv: Path, dest: Path) -> int:
+    """Copy the labels typed into a sample sheet onto the full sheet (matched by path), so that
+    exact duplicates in the full sheet inherit them. Returns the number of labels copied."""
+    with sample_csv.open(encoding="utf-8") as f:
+        labels = {r["path"]: (r.get("label") or "").strip() for r in csv.DictReader(f)}
+    with full_csv.open(encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        fields = reader.fieldnames or []
+        rows = list(reader)
+    n = 0
+    for r in rows:
+        lab = labels.get(r["path"], "")
+        if lab and not (r.get("label") or "").strip():
+            r["label"] = lab
+            n += 1
+    with dest.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fields)
+        w.writeheader()
+        w.writerows(rows)
+    return n
+
+
+def bundle_slugs(bundles_dir: Path, library_root: Path) -> dict[str, str]:
+    """Library folder name -> bundle slug, matching on the compact name ('The_West_Wing' ->
+    'thewestwing' is a prefix of 'thewestwing1999' for the slug 'the-west-wing-1999')."""
+
+    def compact(s: str) -> str:
+        return re.sub(r"[^a-z0-9]", "", s.lower())
+
+    slugs = [p.name for p in bundles_dir.iterdir() if (p / "show.json").exists()]
+    out: dict[str, str] = {}
+    for d in library_root.iterdir():
+        if not d.is_dir():
+            continue
+        hits = [s for s in slugs if compact(s).startswith(compact(d.name))]
+        if len(hits) == 1:
+            out[d.name] = hits[0]
+    return out
+
+
 def write_csv(rows: list[tuple[str, str, str, str, str]], dest: Path) -> None:
     """Write manifest rows to CSV file.
 
@@ -205,14 +245,33 @@ def main() -> None:
         help="Output manifest CSV file",
     )
 
+    parser.add_argument(
+        "--sample", type=Path, default=None,
+        help="Labeled sample sheet; its labels are merged into --sheet first (duplicates inherit)",
+    )
+    parser.add_argument(
+        "--bundles", type=Path, default=None,
+        help="Bundle root: map library folder names to bundle slugs",
+    )
+
     args = parser.parse_args()
+    slugs = bundle_slugs(args.bundles, args.root) if args.bundles else None
+    orders = {"Firefly": "intended-order"}
 
     # Build rows from hand-named files
-    rows = build_rows(args.root)
+    rows = build_rows(args.root, slugs=slugs, orders=orders)
 
     # If sheet is provided, also add rows from sheet
     if args.sheet:
-        sheet_rows = sheet_to_rows(args.sheet)
+        sheet = args.sheet
+        if args.sample:
+            merged = args.output.with_suffix(".sheet.csv")
+            n = merge_sample_labels(args.sample, args.sheet, merged)
+            print(f"Copied {n} labels from the sample onto the full sheet")
+            sheet = merged
+        sheet_rows = sheet_to_rows(sheet)
+        if slugs:
+            sheet_rows = [(p, slugs.get(s, s), lab, o, d) for p, s, lab, o, d in sheet_rows]
         rows.extend(sheet_rows)
 
     # Write to output
