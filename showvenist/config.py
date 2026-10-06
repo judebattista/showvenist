@@ -65,6 +65,22 @@ class WeightsConfig(_Section):
     llm: LlmWeights = Field(default_factory=LlmWeights)
 
 
+class HierarchyConfig(_Section):
+    """[hierarchy]: name patterns (regexes, case-insensitive); empty = the built-in defaults."""
+
+    season_patterns: list[str] = Field(default_factory=list)
+    disc_patterns: list[str] = Field(default_factory=list)
+    named_patterns: list[str] = Field(default_factory=list)
+
+
+class BlocksConfig(_Section):
+    """[blocks]: placeholders until tuned by eval (spec §18)."""
+
+    unclaimed_penalty: float = 1.0
+    gap_penalty: float = 2.0
+    ordering_threshold: float = 4.0
+
+
 class Config(_Section):
     tmdb: TmdbConfig = Field(default_factory=TmdbConfig)
     opensubtitles: OpenSubtitlesConfig = Field(default_factory=OpenSubtitlesConfig)
@@ -72,6 +88,8 @@ class Config(_Section):
     analysis: AnalysisConfig = Field(default_factory=AnalysisConfig)
     llm: LlmConfig = Field(default_factory=LlmConfig)
     weights: WeightsConfig = Field(default_factory=WeightsConfig)
+    hierarchy: HierarchyConfig = Field(default_factory=HierarchyConfig)
+    blocks: BlocksConfig = Field(default_factory=BlocksConfig)
 
 
 def _xdg(var: str, default: str) -> Path:
