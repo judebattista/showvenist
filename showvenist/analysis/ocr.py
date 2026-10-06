@@ -6,10 +6,14 @@ Pipeline: demux the subtitle stream with PyAV from ``start_s``; feed every packe
 a palette tracker (PyAV decodes bitmaps to raw palette indices but doesn't expose the palette,
 so it is parsed here); decode the packet to bitmap rects; ``render`` composites them into one
 dark-on-white image (palette -> luminance, upscale for low-resolution VobSub, binarize, invert,
-pad); Tesseract reads the images in a thread pool.
+pad); Tesseract reads the images in a thread pool, a batch of images per ``tesseract`` process.
 
-Threads, not processes: pytesseract runs each image in its own ``tesseract`` subprocess, so a
-thread pool already uses every core without pickling images across processes.
+The two phases are separate so the M4 pipeline (analysis.pipeline) can run them in different
+stages: ``decode_events`` is the I/O phase (demux, decode, render), ``ocr_events`` the compute
+phase; ``ocr_cues`` is their composition.
+
+Threads, not processes: each batch runs in its own ``tesseract`` subprocess, so a thread pool
+already uses every core without pickling images across processes.
 
 Word check for ``ocr_quality`` (``is_word``): ``wordfreq`` Zipf frequency >= WORD_ZIPF_FLOOR,
 with apostrophes restored for contractions (our normalization drops them: "theyre" is checked as
@@ -23,8 +27,12 @@ against 8.8% for Tesseract's own word list.
 from __future__ import annotations
 
 import functools
+import math
 import os
 import re
+import shlex
+import subprocess
+import tempfile
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -230,12 +238,72 @@ _OCR_FIXES = [
 ]
 
 
-def ocr_image(img: Image.Image, language: str = "en") -> str:
-    """Tesseract one rendered subtitle image; returns trimmed non-empty lines."""
-    text = pytesseract.image_to_string(img, lang=ocr_language(language), config=TESS_CONFIG)
+def _clean(text: str) -> str:
     for rx, rep in _OCR_FIXES:
         text = rx.sub(rep, text)
     return "\n".join(ln.strip() for ln in text.splitlines() if ln.strip())
+
+
+def ocr_image(img: Image.Image, language: str = "en") -> str:
+    """Tesseract one rendered subtitle image; returns trimmed non-empty lines."""
+    return _clean(pytesseract.image_to_string(img, lang=ocr_language(language), config=TESS_CONFIG))
+
+
+# Images per tesseract process. Startup (loading the model) costs about as much as reading
+# three or four subtitle images, so one process per image wastes most of the CPU; a batch of
+# BATCH_SIZE amortizes it while still spreading a window's images over the pool.
+BATCH_SIZE = 16
+_PAGE_SEP = "\f"  # tesseract's default page_separator, written after every page but the last
+
+
+def ocr_batch(images: Sequence[Image.Image], language: str = "en") -> list[str]:
+    """OCR several images in ONE tesseract process (a list file of PNGs: each image is a page,
+    recognized independently; the LSTM engine keeps no state across pages, and on real PGS rips
+    the text is identical to one process per image). Falls back to ``ocr_image`` per image if
+    the process fails or the page count doesn't match."""
+    if len(images) <= 1:
+        return [ocr_image(im, language) for im in images]
+    cmd = pytesseract.pytesseract.tesseract_cmd
+    try:
+        with tempfile.TemporaryDirectory(prefix="sv-ocr-") as tmp:
+            names = []
+            for i, im in enumerate(images):
+                name = os.path.join(tmp, f"{i:05d}.png")
+                im.save(name, format="PNG")
+                names.append(name)
+            lst = os.path.join(tmp, "list.txt")
+            with open(lst, "w", encoding="utf-8") as f:
+                f.write("".join(n + "\n" for n in names))
+            out = os.path.join(tmp, "out")
+            args = [cmd, lst, out, "-l", ocr_language(language), *shlex.split(TESS_CONFIG)]
+            proc = subprocess.run(args, capture_output=True, stdin=subprocess.DEVNULL)
+            if proc.returncode != 0:
+                raise RuntimeError(proc.stderr.decode("utf-8", "replace"))
+            with open(out + ".txt", encoding="utf-8") as f:
+                text = f.read()
+    except (OSError, RuntimeError):
+        return [ocr_image(im, language) for im in images]
+    pages = text.split(_PAGE_SEP)
+    if len(pages) == len(images) + 1 and not pages[-1].strip():
+        pages.pop()
+    if len(pages) != len(images):
+        return [ocr_image(im, language) for im in images]
+    return [_clean(t) for t in pages]
+
+
+def batches(n: int, workers: int, size: int = BATCH_SIZE) -> list[range]:
+    """Split ``n`` items into contiguous batches of at most ``size``, at least one per worker
+    while there are fewer than ``workers`` batches (so a lone window still uses the pool)."""
+    if n <= 0:
+        return []
+    k = max(math.ceil(n / size), min(workers, n))
+    base, extra = divmod(n, k)
+    out, pos = [], 0
+    for i in range(k):
+        m = base + (i < extra)
+        out.append(range(pos, pos + m))
+        pos += m
+    return out
 
 
 def _pool_size(workers: int) -> int:
@@ -243,25 +311,49 @@ def _pool_size(workers: int) -> int:
 
 
 def ocr_images(images: Sequence[Image.Image], language: str, workers: int = 0) -> list[str]:
+    """OCR images in a thread pool of tesseract processes, batched (see ``ocr_batch``)."""
     if not images:
         return []
-    with ThreadPoolExecutor(min(_pool_size(workers), len(images))) as pool:
-        return list(pool.map(lambda im: ocr_image(im, language), images))
+    parts = batches(len(images), _pool_size(workers))
+    with ThreadPoolExecutor(min(_pool_size(workers), len(parts))) as pool:
+        done = pool.map(lambda r: ocr_batch([images[i] for i in r], language), parts)
+        return [t for texts in done for t in texts]
 
 
 @dataclass
-class _Event:
+class BitmapEvent:
+    """One decoded bitmap subtitle event, rendered and ready for OCR."""
+
     start_s: float
     end_s: float | None  # None until bounded by packet duration or the next packet
     image: Image.Image
 
 
-def _decode_events(path: Path, track: SubtitleTrack, start_s: float, end_s: float) -> list[_Event]:
+_Event = BitmapEvent  # pre-M4 name
+
+
+class BitmapDecodeError(Exception):
+    """Decoding failed part way; ``events`` holds the events decoded before the failure."""
+
+    def __init__(self, message: str, events: list[BitmapEvent]):
+        super().__init__(message)
+        self.events = events
+
+
+_DecodeError = BitmapDecodeError  # pre-M4 name
+
+
+def decode_events(
+    path: Path, track: SubtitleTrack, start_s: float, end_s: float
+) -> list[BitmapEvent]:
+    """Decode phase of ``ocr_cues`` (I/O, no OCR): the bitmap events starting in
+    [start_s, end_s], rendered to images. Raises BitmapDecodeError (with the events decoded so
+    far) when the file can't be opened, seeked or demuxed."""
     kind = track.kind
     if kind not in ("pgs", "vobsub"):
         raise ValueError(f"not a bitmap subtitle track: {track.codec}")
     upscale = VOBSUB_UPSCALE if kind == "vobsub" else 1
-    events: list[_Event] = []
+    events: list[BitmapEvent] = []
     try:
         with av.open(str(path)) as c:
             stream = c.streams[track.index]
@@ -301,39 +393,18 @@ def _decode_events(path: Path, track: SubtitleTrack, start_s: float, end_s: floa
                 if img is None:
                     continue
                 dur = float(pkt.duration * pkt.time_base) if pkt.duration else 0.0
-                events.append(_Event(t, t + dur if dur > 0 else None, img))
+                events.append(BitmapEvent(t, t + dur if dur > 0 else None, img))
     except (av.error.FFmpegError, OSError) as e:
-        raise _DecodeError(f"{type(e).__name__}: {e}", events) from e
+        raise BitmapDecodeError(f"{type(e).__name__}: {e}", events) from e
     return events
 
 
-class _DecodeError(Exception):
-    def __init__(self, message: str, events: list[_Event]):
-        super().__init__(message)
-        self.events = events
+_decode_events = decode_events  # pre-M4 name
 
 
-def ocr_cues(
-    path: Path,
-    track: SubtitleTrack,
-    start_s: float,
-    end_s: float,
-    language: str,
-    workers: int = 0,
-) -> list[Cue]:
-    """OCR the bitmap subtitle cues starting in [start_s, end_s]. Text is unnormalized;
-    consecutive identical cues (PGS re-sends an epoch) are merged; empty OCR results dropped.
-    Raises SubtitleReadError (with the cues OCR'd before the failure) when the file can't be
-    opened, seeked or demuxed."""
-    try:
-        events = _decode_events(Path(path), track, start_s, end_s)
-    except _DecodeError as e:
-        raise SubtitleReadError(str(e), _events_to_cues(e.events, language, workers)) from e
-    return _events_to_cues(events, language, workers)
-
-
-def _events_to_cues(events: list[_Event], language: str, workers: int) -> list[Cue]:
-    texts = ocr_images([e.image for e in events], language, workers)
+def cues_from_texts(events: Sequence[BitmapEvent], texts: Sequence[str]) -> list[Cue]:
+    """OCR phase result -> cues: empty texts dropped, consecutive identical texts merged (PGS
+    re-sends an epoch), unbounded events given FALLBACK_CUE_S."""
     cues: list[Cue] = []
     for ev, text in zip(events, texts, strict=True):
         if not text:
@@ -344,6 +415,33 @@ def _events_to_cues(events: list[_Event], language: str, workers: int) -> list[C
             continue
         cues.append(Cue(ev.start_s, end, text))
     return cues
+
+
+def ocr_events(events: Sequence[BitmapEvent], language: str, workers: int = 0) -> list[Cue]:
+    """OCR phase of ``ocr_cues``: images -> text -> cues (no I/O)."""
+    return cues_from_texts(events, ocr_images([e.image for e in events], language, workers))
+
+
+def ocr_cues(
+    path: Path,
+    track: SubtitleTrack,
+    start_s: float,
+    end_s: float,
+    language: str,
+    workers: int = 0,
+) -> list[Cue]:
+    """OCR the bitmap subtitle cues starting in [start_s, end_s]: ``decode_events`` then
+    ``ocr_events``. Text is unnormalized; consecutive identical cues (PGS re-sends an epoch) are
+    merged; empty OCR results dropped. Raises SubtitleReadError (with the cues OCR'd before the
+    failure) when the file can't be opened, seeked or demuxed."""
+    try:
+        events = decode_events(Path(path), track, start_s, end_s)
+    except BitmapDecodeError as e:
+        raise SubtitleReadError(str(e), ocr_events(e.events, language, workers)) from e
+    return ocr_events(events, language, workers)
+
+
+_events_to_cues = ocr_events  # pre-M4 name
 
 
 # --------------------------------------------------------------------------- quality

@@ -4,9 +4,18 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from showvenist.analysis.ocr import ocr_cues, ocr_quality
+from showvenist.analysis.ocr import (
+    BitmapDecodeError,
+    BitmapEvent,
+    cues_from_texts,
+    decode_events,
+    ocr_cues,
+    ocr_quality,
+)
 from showvenist.analysis.probe import probe
 from showvenist.analysis.subtitles import normalize, read_text_cues
 from showvenist.analysis.tracks import cue_count, rank_tracks
@@ -66,14 +75,62 @@ def _cue_key(c: Cue) -> tuple[float, str]:
     return round(c.start_s, 1), normalize(c.text)
 
 
+# reader(path, track, a, b, language, cfg) -> cues of [a, b]; raises SubtitleReadError.
+Reader = Callable[[Path, SubtitleTrack, float, float, str, AnalysisConfig], list[Cue]]
+
+
 def _read(path: Path, track: SubtitleTrack, a: float, b: float, language: str, cfg) -> list[Cue]:
+    """The default reader: decode and OCR in the calling thread."""
     if track.kind == "text":
         return read_text_cues(path, track, a, b)
     return ocr_cues(path, track, a, b, language, cfg.ocr_workers)
 
 
+# The same read split in two phases, so a pipeline can run them in different stages:
+# decode_chunk is the I/O (demux, decode, render bitmaps), finish_chunk turns OCR texts into cues.
+
+
+@dataclass
+class DecodedChunk:
+    """Result of the I/O phase of one chunk read. Text tracks are complete (``cues``); bitmap
+    tracks carry ``events`` whose ``images`` still need OCR. ``error`` is a read failure part
+    way: what was decoded before it is kept, as SubtitleReadError does."""
+
+    track: SubtitleTrack
+    cues: list[Cue] = field(default_factory=list)
+    events: list[BitmapEvent] = field(default_factory=list)
+    error: str | None = None
+
+    @property
+    def images(self) -> list:
+        return [e.image for e in self.events]
+
+
+def decode_chunk(path: Path, track: SubtitleTrack, a: float, b: float) -> DecodedChunk:
+    """I/O phase of a chunk read. Never raises SubtitleReadError: it is recorded in ``error``."""
+    if track.kind == "text":
+        try:
+            return DecodedChunk(track, cues=read_text_cues(path, track, a, b))
+        except SubtitleReadError as e:
+            return DecodedChunk(track, cues=e.cues, error=str(e))
+    try:
+        return DecodedChunk(track, events=decode_events(path, track, a, b))
+    except BitmapDecodeError as e:
+        return DecodedChunk(track, events=e.events, error=str(e))
+
+
+def finish_chunk(d: DecodedChunk, texts: Sequence[str] = ()) -> list[Cue]:
+    """Compute phase result of a chunk read: ``texts`` are the OCR of ``d.images`` (in order).
+    Returns the cues, or raises SubtitleReadError with them when the decode failed, exactly like
+    the default reader."""
+    cues = d.cues if d.track.kind == "text" else cues_from_texts(d.events, texts)
+    if d.error is not None:
+        raise SubtitleReadError(d.error, cues)
+    return cues
+
+
 def _read_window(
-    path, track, start, limit, language, cfg, min_lines, chunk=CHUNK_S
+    path, track, start, limit, language, cfg, min_lines, chunk=CHUNK_S, reader: Reader | None = None
 ) -> tuple[Window, float]:
     """Read from start in chunks until min_lines (0 = never stop early) or limit. A read error
     ends the window early: it keeps the cues read so far and records the error."""
@@ -92,7 +149,7 @@ def _read_window(
     while pos < limit:
         nxt = min(pos + chunk, limit)
         try:
-            add(_read(path, track, pos, nxt, language, cfg))
+            add((reader or _read)(path, track, pos, nxt, language, cfg))
         except SubtitleReadError as e:
             add(e.cues)
             error = str(e) or type(e).__name__
@@ -121,7 +178,9 @@ def _extractor_version(track: SubtitleTrack) -> int:
     return EXTRACTOR_VERSIONS["text" if track.kind == "text" else "ocr"]
 
 
-def _sample_windows(path, fp, track, dur, language, cfg, cache) -> list[tuple[Window, float]]:
+def _sample_windows(
+    path, fp, track, dur, language, cfg, cache, reader: Reader | None = None
+) -> list[tuple[Window, float]]:
     max_s = cfg.window_max_minutes * 60.0
     unknown_dur = not dur or dur <= 0
     wins: list[tuple[Window, float]] = []
@@ -149,6 +208,7 @@ def _sample_windows(path, fp, track, dur, language, cfg, cache) -> list[tuple[Wi
                     cfg,
                     0 if unknown_dur else cfg.window_min_lines,
                     chunk=math.inf if unknown_dur else CHUNK_S,
+                    reader=reader,
                 ),
             )
         )
@@ -163,9 +223,13 @@ def extract_dialogue(
     cache: AnalysisCache | None = None,
     full: bool = False,
     probe_result: MediaProbe | None = None,
+    *,
+    reader: Reader | None = None,
 ) -> Dialogue:
     """Stage 2 (sampled windows) or, with `full`, stage 3. `probe_result` saves re-probing when
-    the caller already has it; otherwise the probe goes through `cache`."""
+    the caller already has it; otherwise the probe goes through `cache`. `reader` replaces the
+    in-thread chunk read (the pipeline's reader gates the I/O per storage root and OCRs in a
+    shared pool); it must return what the default reader would."""
     path = Path(path)
     info = probe_result if probe_result is not None else probe(path, cache)
     fp = fingerprint(path)
@@ -176,7 +240,7 @@ def extract_dialogue(
     dur = info.duration_s
     notes: list[str] = []
     track = ranked[0]
-    wins = _sample_windows(path, fp, track, dur, language, cfg, cache)
+    wins = _sample_windows(path, fp, track, dur, language, cfg, cache, reader)
     if cue_count(track) is None:
         # No frame-count tags: the pick is by stream order, so check it with the stage-2 lines
         # and fall back to the next unknown-count track while it reads almost nothing.
@@ -185,7 +249,7 @@ def extract_dialogue(
         for alt in others:
             if sum(w.lines for w, _ in best[1]) >= MIN_UNKNOWN_TRACK_LINES:
                 break
-            alt_wins = _sample_windows(path, fp, alt, dur, language, cfg, cache)
+            alt_wins = _sample_windows(path, fp, alt, dur, language, cfg, cache, reader)
             if sum(w.lines for w, _ in alt_wins) > sum(w.lines for w, _ in best[1]):
                 best = (alt, alt_wins)
         track, wins = best
@@ -226,7 +290,7 @@ def extract_dialogue(
                         fp,
                         key,
                         lambda s=s, e=e: _read_window(
-                            path, track, s, e, language, cfg, 0, chunk=max_s
+                            path, track, s, e, language, cfg, 0, chunk=max_s, reader=reader
                         ),
                     )
                 )

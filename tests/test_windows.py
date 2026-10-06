@@ -92,3 +92,50 @@ def test_no_track(tmp_path):
     d = W.extract_dialogue(p, "en", set(), CFG)
     assert d.track is None and d.windows == [] and d.ocr_quality is None
     assert ocr_mod  # imported for patch parity
+
+
+# --------------------------------------------------------------------------- phase split
+
+
+def test_decode_finish_split_matches_default_reader(tmp_path):
+    from showvenist.analysis.probe import probe
+
+    t = tmp_path / "t.mkv"
+    make_mkv_with_text_subs(t, CUES, duration_s=200)
+    track = probe(t).subtitle_tracks[0]
+    d = W.decode_chunk(t, track, 30.0, 90.0)
+    assert d.error is None and d.events == [] and d.images == []
+    assert W.finish_chunk(d) == W._read(t, track, 30.0, 90.0, "en", CFG)
+
+    p = tmp_path / "p.mkv"
+    make_mkv_with_bitmap_subs(p, CUES[:20], "pgs", duration_s=70)
+    track = probe(p).subtitle_tracks[0]
+    d = W.decode_chunk(p, track, 0.0, 30.0)
+    assert d.error is None and len(d.images) == 11 and d.cues == []  # 0 s .. 30 s inclusive
+    texts = ocr_mod.ocr_images(d.images, "en")
+    assert W.finish_chunk(d, texts) == W._read(p, track, 0.0, 30.0, "en", CFG)
+
+
+def test_decode_chunk_records_errors_and_finish_raises(tmp_path):
+    from showvenist.analysis.types import SubtitleReadError, SubtitleTrack
+
+    for track in (SubtitleTrack(1, "subrip", "eng"), SubtitleTrack(1, "hdmv_pgs_subtitle", "eng")):
+        d = W.decode_chunk(tmp_path / "missing.mkv", track, 0.0, 60.0)
+        assert d.error
+        with pytest.raises(SubtitleReadError):
+            W.finish_chunk(d, [])
+
+
+def test_extract_dialogue_uses_injected_reader(tmp_path):
+    p = tmp_path / "t.mkv"
+    make_mkv_with_text_subs(p, CUES, duration_s=200)
+    calls = []
+
+    def reader(path, track, a, b, language, cfg):
+        calls.append((a, b))
+        return W.finish_chunk(W.decode_chunk(path, track, a, b))
+
+    d = W.extract_dialogue(p, "en", set(), CFG, reader=reader)
+    assert calls and len(d.windows) == 3
+    plain = W.extract_dialogue(p, "en", set(), CFG)
+    assert [w.cues for w in d.windows] == [w.cues for w in plain.windows]

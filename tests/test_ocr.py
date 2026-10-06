@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shutil
 import struct
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -238,3 +239,87 @@ def test_ocr_quality_uses_vocabulary_and_word_check():
 def test_ocr_quality_junk_scores_low_and_real_dialogue_high():
     assert ocr_quality(["Don't leave tonight, they're coming."], set()) == 1.0
     assert ocr_quality(["tbe wliat rn ii lt qzxv"], set()) == 0.0
+
+
+# --------------------------------------------------------------------------- batching
+
+
+def test_batches_split_evenly_and_fill_workers():
+    assert ocr.batches(0, 4) == []
+    assert [len(r) for r in ocr.batches(40, 1)] == [14, 13, 13]  # <= BATCH_SIZE each
+    assert [len(r) for r in ocr.batches(5, 8)] == [1] * 5
+    parts = ocr.batches(37, 4)
+    assert [i for r in parts for i in r] == list(range(37)) and len(parts) == 4
+
+
+def _cue_images() -> list[Image.Image]:
+    lut = np.zeros(256, np.float32)
+    lut[1] = 255.0
+    texts = ["Where were you last night?", "We need to go.", "I told you, it's not safe."]
+    imgs = [render([Bitmap(100, 800, _indexed_text(t, 40))], lut) for t in texts]
+    blank = Image.fromarray(np.full((60, 200), 255, np.uint8), "L")
+    return [imgs[0], blank, imgs[1], blank, imgs[2]]  # type: ignore[list-item]
+
+
+@needs_tesseract
+def test_ocr_batch_matches_one_process_per_image():
+    imgs = _cue_images()
+    single = [ocr.ocr_image(im, "en") for im in imgs]
+    assert single[1] == "" and single[0] == "Where were you last night?"
+    assert ocr.ocr_batch(imgs, "en") == single
+    assert ocr.ocr_images(imgs, "en", workers=2) == single
+
+
+def test_ocr_batch_falls_back_on_page_mismatch(monkeypatch):
+    class Done:
+        returncode = 0
+        stderr = b""
+
+    def fake_run(args, **kw):
+        Path(args[2] + ".txt").write_text("only one page")
+        return Done()
+
+    monkeypatch.setattr(ocr.subprocess, "run", fake_run)
+    monkeypatch.setattr(ocr, "ocr_image", lambda im, lang="en": f"single {im.width}")
+    imgs = [Image.new("L", (w, 10), 255) for w in (5, 6, 7)]
+    assert ocr.ocr_batch(imgs, "en") == ["single 5", "single 6", "single 7"]
+
+    def failing_run(args, **kw):
+        Done.returncode = 1
+        return Done()
+
+    monkeypatch.setattr(ocr.subprocess, "run", failing_run)
+    assert ocr.ocr_batch(imgs, "en") == ["single 5", "single 6", "single 7"]
+
+
+def test_ocr_batch_splits_pages(monkeypatch):
+    class Done:
+        returncode = 0
+        stderr = b""
+
+    def fake_run(args, **kw):  # tesseract writes \f after every page but the last
+        Path(args[2] + ".txt").write_text(" | know.\n\f\f‘two’\n")
+        return Done()
+
+    monkeypatch.setattr(ocr.subprocess, "run", fake_run)
+    imgs = [Image.new("L", (5, 10), 255)] * 3
+    assert ocr.ocr_batch(imgs, "en") == ["I know.", "", "'two'"]
+
+
+@needs_tesseract
+def test_decode_and_ocr_phases_compose_to_ocr_cues(tmp_path):
+    from showvenist.analysis.types import SubtitleTrack
+    from tests.fixtures.bitmapsubs import make_mkv_with_bitmap_subs
+
+    p = tmp_path / "p.mkv"
+    make_mkv_with_bitmap_subs(
+        p, [(1.0, 3.0, "hello there"), (4.0, 6.0, "the door is open")], "pgs", duration_s=10
+    )
+    track = SubtitleTrack(1, "hdmv_pgs_subtitle", "eng")
+    events = ocr.decode_events(p, track, 0.0, 10.0)
+    assert [(e.start_s, e.end_s) for e in events] == [(1.0, 3.0), (4.0, 6.0)]
+    cues = ocr.ocr_events(events, "en")
+    assert cues == ocr.ocr_cues(p, track, 0.0, 10.0, "en")
+    texts = ocr.ocr_batch([e.image for e in events], "en")
+    assert ocr.cues_from_texts(events, texts) == cues
+    assert [c.text.lower() for c in cues] == ["hello there", "the door is open"]
