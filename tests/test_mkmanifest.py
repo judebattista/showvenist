@@ -342,3 +342,18 @@ def test_a_show_prefix_in_an_episode_label_is_tolerated(tmp_path):
     )
     assert [r[2] for r in sheet_to_rows(sheet)] == [
         "S03E05", "S01E02+E03", "S00E00+E01"]
+
+
+def test_sheet_labels_use_the_per_show_default_ordering(tmp_path):
+    from showvenist.eval.mkmanifest import sheet_to_rows
+
+    sheet = tmp_path / "s.csv"
+    sheet.write_text(
+        "path,show,label,same_as\n"
+        "Samurai_Jack/Season03/a_t00.mkv,Samurai_Jack,s03e11,\n"
+        "Firefly/Season01/b_t00.mkv,Firefly,s01e02,\n"
+        "Supernatural/Season02/c_t00.mkv,Supernatural,s02e03,\n"
+    )
+    assert [(r[1], r[3]) for r in sheet_to_rows(sheet)] == [
+        ("Samurai_Jack", "disk"), ("Firefly", "intended-order"), ("Supernatural", "aired")]
+    assert sheet_to_rows(sheet, {"Supernatural": "dvd"})[2][3] == "dvd"

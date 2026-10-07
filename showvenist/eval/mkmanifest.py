@@ -21,7 +21,9 @@ _RIP = re.compile(r"_t(\d\d)\.mkv$", re.I)
 _DISC = re.compile(r"disc[ _-]?(\d+)", re.I)
 
 # Default ordering override for known shows
-DEFAULT_ORDERS = {"Firefly": "intended-order"}
+# Samurai Jack: the Blu-ray disks split TMDB's combined entries, so labels use the `disk`
+# ordering defined in the bundle's overrides.yaml
+DEFAULT_ORDERS = {"Firefly": "intended-order", "Samurai_Jack": "disk"}
 
 
 def _slug_from_dirname(dirname: str) -> str:
@@ -112,7 +114,9 @@ def build_rows(
     return rows
 
 
-def sheet_to_rows(sheet_csv: Path) -> list[tuple[str, str, str, str, str]]:
+def sheet_to_rows(
+    sheet_csv: Path, orders: dict[str, str] | None = None
+) -> list[tuple[str, str, str, str, str]]:
     """Convert hand-labeling sheet to manifest rows.
 
     Reads data/extras-sheet.csv and produces manifest rows:
@@ -162,7 +166,9 @@ def sheet_to_rows(sheet_csv: Path) -> list[tuple[str, str, str, str, str]]:
         show = parts[0] if parts else ""
 
         # Get ordering from row or default
-        order = ((row.get("order") or "") or "aired").strip() or "aired"
+        # the labels are written in the user's disk numbering: per-show ordering, else aired
+        default = {**DEFAULT_ORDERS, **(orders or {})}.get(show, "aired")
+        order = ((row.get("order") or "") or default).strip() or default
 
         # Get disc from row
         disc = (row.get("disc") or "").strip()
@@ -272,7 +278,7 @@ def main() -> None:
 
     args = parser.parse_args()
     slugs = bundle_slugs(args.bundles, args.root) if args.bundles else None
-    orders = {"Firefly": "intended-order"}
+    orders: dict[str, str] = {}
 
     # Build rows from hand-named files
     rows = build_rows(args.root, slugs=slugs, orders=orders)
@@ -285,7 +291,7 @@ def main() -> None:
             n = merge_sample_labels(args.sample, args.sheet, merged)
             print(f"Copied {n} labels from the sample onto the full sheet")
             sheet = merged
-        sheet_rows = sheet_to_rows(sheet)
+        sheet_rows = sheet_to_rows(sheet, orders)
         if slugs:
             sheet_rows = [(p, slugs.get(s, s), lab, o, d) for p, s, lab, o, d in sheet_rows]
         rows.extend(sheet_rows)
