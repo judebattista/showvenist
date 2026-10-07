@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from showvenist.analysis.probe import probe
+from showvenist.hierarchy.parse import walk_media
 from showvenist.state.fingerprint import content_key
 
 _RIP = re.compile(r"_t(\d\d)\.mkv$", re.I)
@@ -50,7 +51,7 @@ def scan(root: Path) -> tuple[list[Row], dict[str, float]]:
     """Probe unnamed rips; return them with each show's median named-episode length (minutes)."""
     rips: list[Row] = []
     named: dict[str, list[float]] = defaultdict(list)
-    for p in sorted(root.rglob("*.mkv")):
+    for p in walk_media(root):
         show = _show_of(p, root)
         if _RIP.search(p.name):
             pr = probe(p)

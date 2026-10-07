@@ -377,3 +377,14 @@ def test_disagreements_and_discless_tags_are_notices(env, monkeypatch):
                in n for n in notes)
     assert "1 file has a title tag that names no disc (e.g. 'UPHE_UPB75_112369A'); they are " \
            "solved without disc blocks." in notes
+
+
+def test_identify_skips_an_ignored_folder_and_says_so(tmp_path, monkeypatch):
+    from showvenist import cli as _cli
+    from showvenist.hierarchy.parse import IGNORE_FILE
+
+    show = tmp_path / "Show"
+    (show / "Extras Movie").mkdir(parents=True)
+    (show / "Extras Movie" / "movie_t00.mkv").write_bytes(b"x")
+    (show / "Extras Movie" / IGNORE_FILE).write_text("")
+    assert _cli._expand([show]) == []  # nothing else under it: the ignored folder is not walked

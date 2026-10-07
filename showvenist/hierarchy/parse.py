@@ -218,6 +218,34 @@ def suggest_disc_order(discs: list[DiscNode]) -> list[DiscNode]:
     return ordered
 
 
+IGNORE_FILE = ".showvenist-ignore"
+
+
+def is_ignored(folder: Path) -> bool:
+    """A folder holding a `.showvenist-ignore` file is out of scope: never analyzed, matched,
+    renamed or moved, and never reported as a parse problem (movies, miniseries, bonus discs)."""
+    return (folder / IGNORE_FILE).exists()
+
+
+def walk_media(root: Path, patterns: tuple[str, ...] = ("*.mkv",)) -> list[Path]:
+    """Files under `root` matching `patterns`, skipping ignored folders (and an ignored root)."""
+    if root.is_file():
+        return [root]
+    out: list[Path] = []
+
+    def visit(folder: Path) -> None:
+        if is_ignored(folder):
+            return
+        for p in sorted(folder.iterdir()):
+            if p.is_dir():
+                visit(p)
+            elif any(p.match(pat) for pat in patterns):
+                out.append(p)
+
+    visit(root)
+    return out
+
+
 class _Builder:
     def __init__(
         self,
@@ -229,6 +257,7 @@ class _Builder:
         self.tag_of = tag_of
         self.stat = stat
         self.problems: list[str] = []
+        self.ignored: list[Path] = []
         self.disagreements: list[str] = []
         self._seen: set[tuple[str, str]] = set()
 
@@ -265,11 +294,20 @@ class _Builder:
         )
         return [self.file(p) for p in paths]
 
+    def subdirs(self, folder: Path) -> list[Path]:
+        """Sub-folders in natural order, leaving out (and recording) ignored ones."""
+        out = []
+        dirs = (p for p in folder.iterdir() if p.is_dir())
+        for p in sorted(dirs, key=lambda p: _natural(p.name)):
+            if is_ignored(p):
+                self.ignored.append(p)
+            else:
+                out.append(p)
+        return out
+
     def all_files_under(self, folder: Path) -> list[FileNode]:
         out = self.files_in(folder)
-        for sub in sorted(
-            (p for p in folder.iterdir() if p.is_dir()), key=lambda p: _natural(p.name)
-        ):
+        for sub in self.subdirs(folder):
             out += self.all_files_under(sub)
         return out
 
@@ -333,9 +371,7 @@ class _Builder:
 
     def season_node(self, folder: Path, number: int | None) -> SeasonNode:
         node = SeasonNode(number, folder)
-        for sub in sorted(
-            (p for p in folder.iterdir() if p.is_dir()), key=lambda p: _natural(p.name)
-        ):
+        for sub in self.subdirs(folder):
             ref = self.disc(sub.name)
             if ref is None:
                 self.problems.append(f"cannot parse disc folder {sub.name!r} in {folder.name!r}")
@@ -371,6 +407,10 @@ def build_tree(
     """Walk `root` (show folder, season folder, disc folder, or flat list of files)."""
     b = _Builder(config, tag_of, stat)
     show = ShowNode(root=root)
+    if root.is_dir() and is_ignored(root):
+        show.name = root.name
+        show.ignored = [root]
+        return show
     seasons: list[SeasonNode] = []
     root_disc = b.disc(root.name)
     root_season = b.season(root.name)
@@ -385,9 +425,7 @@ def build_tree(
         seasons.append(b.season_node(root, root_season))
     else:
         show.name = root.name
-        for sub in sorted(
-            (p for p in root.iterdir() if p.is_dir()), key=lambda p: _natural(p.name)
-        ):
+        for sub in b.subdirs(root):
             ref = b.disc(sub.name)
             n = b.season(sub.name) if ref is None else None
             if n is not None:
@@ -422,5 +460,6 @@ def build_tree(
     b.sort(seasons)
     show.seasons = seasons
     show.problems = b.problems
+    show.ignored = b.ignored
     show.disagreements = b.disagreements
     return show

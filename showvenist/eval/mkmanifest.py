@@ -13,6 +13,8 @@ import csv
 import re
 from pathlib import Path
 
+from showvenist.hierarchy.parse import walk_media
+
 # Patterns for named files and disc numbers
 _NAMED = re.compile(r"[sS](\d{1,2})[eE](\d{1,3})([a-z])?", re.I)
 _RIP = re.compile(r"_t(\d\d)\.mkv$", re.I)
@@ -73,7 +75,7 @@ def build_rows(
     rows: list[tuple[str, str, str, str, str]] = []
 
     # Scan root for MKV files
-    for mkv in sorted(root.rglob("*.mkv")):
+    for mkv in walk_media(root):
         filename = mkv.name
 
         # Skip raw rips (files matching *_tNN.mkv)

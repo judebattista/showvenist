@@ -147,9 +147,11 @@ def inspect_cmd(
 
 
 def _expand(paths: list[Path]) -> list[Path]:
+    from showvenist.hierarchy.parse import walk_media
+
     out: list[Path] = []
     for p in paths:
-        out += sorted(p.rglob("*.mkv")) if p.is_dir() else [p]
+        out += walk_media(p) if p.is_dir() else [p]
     return out
 
 
@@ -364,6 +366,7 @@ def _input_tree(paths: list[Path], hcfg, tag_of):
     for t in trees:
         out.problems += t.problems
         out.disagreements += t.disagreements
+        out.ignored += t.ignored
         for s in t.seasons:
             have = by_num.get(s.number)
             if have is None:
@@ -457,6 +460,8 @@ def format_tree(tree, slug: str | None = None, show_name: str | None = None) -> 
         for f in allf:
             if not f.ready:
                 lines.append(f"      not ready: {f.path.name} ({f.not_ready_reason})")
+    for ig in tree.ignored:
+        lines.append(f"Skipping {ig.name}: it has a .showvenist-ignore file")
     if tree.problems:
         lines.append("Problems:")
         lines += [f"  {p}" for p in tree.problems]
