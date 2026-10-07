@@ -105,3 +105,52 @@ def test_vanished_episodes_warn_and_are_skipped(tmp_path):
         b = run(tmp_path, text)
     assert b.episodes[0].title == "x"
     assert [e.episode_id for e in b.orderings["r"].entries] == ["tmdb:1"]
+
+
+def _write(tmp_path, text):
+    p = tmp_path / "overrides.yaml"
+    p.write_text(text)
+    return p
+
+
+def test_new_episodes_and_an_inherited_ordering(tmp_path):
+    """Samurai Jack: TMDB lists one 'Birth of Evil'; the disks hold two parts before the finale."""
+    from showvenist.bundle.schema import Ordering, OrderingEntry
+
+    b = make()  # tmdb:1, tmdb:2
+    b = b.model_copy(update={"orderings": {"aired": Ordering(
+        source="tmdb", type="aired",
+        entries=[OrderingEntry(season=1, episode=1, episode_id="tmdb:1"),
+                 OrderingEntry(season=2, episode=1, episode_id="tmdb:2")])}})
+    p = _write(tmp_path, """
+new_episodes:
+  "custom:boe-1": {title: "The Birth of Evil, Part 1", runtime_min: 22, synopses: ["Part one."]}
+  "custom:boe-2": {title: "The Birth of Evil, Part 2", runtime_min: 22}
+orderings:
+  disk:
+    base: aired
+    entries:
+      - {season: 2, episode: 1, episode_id: "custom:boe-1"}
+      - {season: 2, episode: 2, episode_id: "custom:boe-2"}
+      - {season: 2, episode: 3, episode_id: "tmdb:2"}
+""")
+    out = apply_overrides(b, p)
+    ids = [e.id for e in out.episodes]
+    assert ids == ["tmdb:1", "tmdb:2", "custom:boe-1", "custom:boe-2"]
+    boe = out.episode_by_id()["custom:boe-1"]
+    assert boe.runtime_min == 22 and boe.synopses[0].text == "Part one."
+    disk = out.orderings["disk"]
+    assert [(e.season, e.episode, e.episode_id) for e in disk.entries] == [
+        (1, 1, "tmdb:1"), (2, 1, "custom:boe-1"), (2, 2, "custom:boe-2"), (2, 3, "tmdb:2")]
+    assert out.orderings["aired"] == b.orderings["aired"]  # the base is untouched
+
+
+def test_new_episode_errors(tmp_path):
+    with pytest.raises(BundleError, match="already exists"):
+        apply_overrides(make(), _write(tmp_path, 'new_episodes:\n  "tmdb:1": {title: x}\n'))
+    with pytest.raises(BundleError, match="needs a mapping with a 'title'"):
+        bad = 'new_episodes:\n  "custom:a": {runtime_min: 5}\n'
+        apply_overrides(make(), _write(tmp_path, bad))
+    with pytest.raises(BundleError, match="unknown base"):
+        bad = 'orderings:\n  o:\n    base: nope\n    entries: []\n'
+        apply_overrides(make(), _write(tmp_path, bad))

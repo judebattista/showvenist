@@ -1,6 +1,6 @@
 # showvenist: Specification
 
-**Status:** Draft v0.3 (M0 revision, for review; decisions 39-52 added) · **Date:** 2026-10-05 · **Scope:** v1 in detail, v2 and v3 outlined
+**Status:** Draft v0.3 (M0 revision, for review; decisions 39-53 added) · **Date:** 2026-10-05 · **Scope:** v1 in detail, v2 and v3 outlined
 
 showvenist identifies which season and episode of a known TV show a video file contains. It's built for rips of retail DVDs and Blu-rays, whose files have meaningless names (`title_t03.mkv`). It compares signals extracted from the media (subtitle dialogue, duration, container metadata) against a reference data bundle for the show. It solves a whole season at once, explains every match, and renames files only after you confirm.
 
@@ -448,6 +448,24 @@ orderings:
   release_bluray_2008:      # custom ordering for an odd release
     - { season: 1, episode: 1, episode_id: tmdb:62091 }
 ```
+
+Two more sections cover what a source gets wrong (decision 53):
+
+```yaml
+# Samurai Jack: TMDB lists "Birth of Evil" as one 44-minute episode; the disks have two parts
+new_episodes:
+  "custom:boe-1": { title: "The Birth of Evil, Part 1", runtime_min: 22, synopses: ["…"] }
+  "custom:boe-2": { title: "The Birth of Evil, Part 2", runtime_min: 22 }
+orderings:
+  disk:
+    base: aired             # inherit every season from this ordering…
+    entries:                # …and replace only the seasons listed here
+      - { season: 4, episode: 12, episode_id: "custom:boe-1" }
+      - { season: 4, episode: 13, episode_id: "custom:boe-2" }
+```
+
+- `new_episodes` adds episodes under new ids (use a `custom:` prefix; an id that exists is an error). A new episode takes the same fields as an override, and a bare string in `synopses` is a synopsis from the overrides file.
+- An ordering is a list of entries, or `{base, entries}`: it starts from `base` and the seasons named in `entries` replace the base's seasons.
 
 - Validated on load with pydantic. Errors name the file and line.
 - After a refresh, overrides pointing to episodes that no longer exist produce warnings.
@@ -1192,3 +1210,4 @@ Decisions made while writing this spec (2026-10-02) and reviewing it (from 2026-
 | 50 | The manifest label `S01E01+S01E02` marks one file holding two episodes that the bundle lists separately (found in the user's library: a legitimate double-length episode that TMDB splits). A decision for either episode is correct; both episodes count as held by the file in the decision-41 collision rule; for the weight fit it is a set label over the two. v1 still assigns the file one position; two-position assignment stays in v2 | The spec's "labels that don't resolve to exactly one episode are left out" would have discarded a real, verifiable file, and labeling it with one episode would have counted a correct answer for the other as an error. Chosen by the orchestrator at the user's request |
 | 51 | An empty `.showvenist-ignore` file in a folder takes the folder out of scope: it is not analyzed, matched, renamed or moved, and is not a parse problem. The tree shows it as skipped. A file named explicitly on the command line is still the user's choice | Farscape's *The Peacekeeper Wars* (two files, 91.8 and 90.2 minutes) sits in its own folder because TMDB has no episode for it: the tool would have matched nothing, called both files extras, and planned to move them to `extras/`. Moving them into `Specials/` would not help, since TMDB's specials are all behind-the-scenes extras. Chosen by the user |
 | 52 | Near-duplicate detection (same episode, different bytes) uses dialogue containment ≥ 0.5 over word 5-grams, with at least 100 phrases per file, within one season's files; the primary copy is solved and the rest mirror it. Duplicates are never decided by duration or size | Checked on the library: Burn Notice S06 has exactly one near-duplicate pair (100% overlap, 1,403 of 1,403 phrases; sizes differ by one byte) and the next-highest overlap of any pair is 0.3%; four Burn Notice pairs with identical runtimes were three different episodes (0–2 shared phrases) and one true copy. Supernatural S02's duplicates are all exact. What the move plan does with duplicates (which copy keeps the episode name, where the others go) is decided in M5. Chosen by the user |
+| 53 | `overrides.yaml` can add episodes (`new_episodes`) and define an ordering that inherits another (`base` plus `entries` that replace whole seasons) | Samurai Jack season 4 on TMDB lists *Birth of Evil* as one 44-minute episode (aired S04E04, intended S03E11); the disks hold two parts just before the finale. No ordering in the bundle matched, labels like S04E12 could not resolve, and writing a whole 5-season ordering by hand to move two entries is error-prone. Requested by the user's library |

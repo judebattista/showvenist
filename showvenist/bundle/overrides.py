@@ -81,10 +81,12 @@ def apply_overrides(bundle: Bundle, path: Path) -> Bundle:
     data, root = load_overrides_text(path)
     top = _map(root)
     for key, (knode, _) in top.items():
-        if key not in ("episodes", "orderings"):
+        if key not in ("episodes", "orderings", "new_episodes"):
             raise BundleError(path, f"unknown top-level key {key!r}", _line(knode))
 
     episodes = {e.id: e.model_copy(deep=True) for e in bundle.episodes}
+    added: list[str] = []
+    _add_new_episodes(data, top, episodes, added, path)
     ep_section = data.get("episodes")
     if ep_section is not None and not isinstance(ep_section, dict):
         raise BundleError(path, "'episodes' must be a mapping", _line(top["episodes"][1]))
@@ -116,6 +118,19 @@ def apply_overrides(bundle: Bundle, path: Path) -> Bundle:
         if name in bundle.orderings and bundle.orderings[name].source != _ORDERING_SOURCE:
             raise BundleError(path, f"ordering {name!r} already exists in the bundle; "
                               "pick another name", _line(knode))
+        base_name: str | None = None
+        if isinstance(entries, dict):
+            # {base: <ordering>, entries: [...]}: inherit `base`, replace the seasons listed here
+            extra = set(entries) - {"base", "entries"}
+            if extra or "entries" not in entries:
+                raise BundleError(path, f"ordering {name!r}: use 'base' and 'entries' only "
+                                  "(entries is required)", _line(vnode))
+            base_name = str(entries.get("base") or "")
+            if base_name and base_name not in orderings:
+                raise BundleError(path, f"ordering {name!r}: unknown base {base_name!r}",
+                                  _line(vnode))
+            sub_nodes = _map(vnode)
+            entries, vnode = entries["entries"], sub_nodes["entries"][1]
         if not isinstance(entries, list):
             raise BundleError(path, f"ordering {name!r} must be a list of entries", _line(vnode))
         parsed = []
@@ -126,17 +141,46 @@ def apply_overrides(bundle: Bundle, path: Path) -> Bundle:
                 raise BundleError(path, _verr(e), _line(inode)) from e
             if parsed[-1].episode_id not in episodes:
                 _warn_vanished(path, parsed.pop().episode_id, inode)
+        if base_name:
+            replaced = {e.season for e in parsed}
+            inherited = [e for e in orderings[base_name].entries if e.season not in replaced]
+            parsed = sorted(inherited + parsed, key=lambda e: (e.season, e.episode))
         orderings[name] = Ordering(
             source=_ORDERING_SOURCE, type=_ORDERING_TYPE, name=name, entries=parsed
         )
 
     merged = bundle.model_copy(
         update={
-            "episodes": [episodes[e.id] for e in bundle.episodes],
+            "episodes": [episodes[e.id] for e in bundle.episodes] + [episodes[i] for i in added],
             "orderings": orderings,
         }
     )
     return merged.with_revision(path.parent)
+
+
+def _add_new_episodes(data: dict, top: dict, episodes: dict, added: list, path: Path) -> None:
+    """`new_episodes:` add episodes the source lacks (e.g. one half of a two-part TMDB entry)."""
+    section = data.get("new_episodes")
+    if section is None:
+        return
+    if not isinstance(section, dict):
+        raise BundleError(path, "'new_episodes' must be a mapping", _line(top["new_episodes"][1]))
+    nodes = _map(top["new_episodes"][1])
+    for ep_id, fields in section.items():
+        ep_id = str(ep_id)
+        if ep_id not in nodes:
+            raise BundleError(path, f"unsupported episode key {ep_id!r} (quote it)", None)
+        knode, vnode = nodes[ep_id]
+        if ep_id in episodes:
+            raise BundleError(path, f"new episode {ep_id!r} already exists in the bundle; "
+                              "use a new id such as 'custom:...'", _line(knode))
+        if not isinstance(fields, dict) or not str(fields.get("title") or "").strip():
+            raise BundleError(path, f"new episode {ep_id!r} needs a mapping with a 'title'",
+                              _line(vnode))
+        rest = {k: v for k, v in fields.items() if k != "title"}
+        ep = Episode(id=ep_id, title=str(fields["title"]))
+        episodes[ep_id] = _apply_episode(ep, rest, _map(vnode), path)
+        added.append(ep_id)
 
 
 def _verr(e: ValidationError) -> str:
@@ -174,6 +218,9 @@ def _apply_episode(ep: Episode, fields: dict, nodes: dict, path: Path) -> Episod
                 if not isinstance(value, list):
                     raise BundleError(path, f"{name} must be a list", _line(vnode))
                 model = Synopsis if name == "synopses" else CastEntry
+                if name == "synopses":  # a bare string is a synopsis from the overrides file
+                    value = [{"source": "overrides", "text": v} if isinstance(v, str) else v
+                             for v in value]
                 new = [model.model_validate(v) for v in value]
                 cur = getattr(ep, name)
                 update[name] = cur + [n for n in new if n not in cur]
