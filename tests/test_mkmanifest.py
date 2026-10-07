@@ -328,3 +328,17 @@ def test_sheet_labels_are_normalized_including_two_part_and_extra_multi(tmp_path
     )
     assert [r[2] for r in sheet_to_rows(sheet)] == [
         "S01E01+S01E02", "S02E05+E06", "extra-multi", "S03E04", "extra"]
+
+
+def test_a_show_prefix_in_an_episode_label_is_tolerated(tmp_path):
+    from showvenist.eval.mkmanifest import sheet_to_rows
+
+    sheet = tmp_path / "s.csv"
+    sheet.write_text(
+        "path,show,label,same_as\n"
+        "A/a_t00.mkv,A,the_wire_s03e05,\n"
+        "A/a_t01.mkv,A,Firefly_S01E02+e03,\n"
+        "A/a_t02.mkv,A,show_s00e00+e01,\n"
+    )
+    assert [r[2] for r in sheet_to_rows(sheet)] == [
+        "S03E05", "S01E02+E03", "S00E00+E01"]

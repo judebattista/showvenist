@@ -180,6 +180,10 @@ def _normalize_part(part: str) -> str:
     m = re.fullmatch(r"[eE](\d{1,3})", part)
     if m:
         return f"E{int(m.group(1)):02d}"
+    # tolerate a show prefix ('the_wire_s03e05'): the show is in its own column
+    m = re.search(r"(?<![a-z0-9])[sS](\d{1,2})[eE](\d{1,3})(?![0-9])", part)
+    if m and part.lower() not in ("extra", "extra-multi", "episode?"):
+        return _normalize_label(int(m.group(1)), int(m.group(2)))
     return part.lower() if part.lower() in ("extra", "extra-multi", "episode?") else part
 
 
