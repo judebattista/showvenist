@@ -261,9 +261,11 @@ READINESS_SETTLE_SECONDS = 1.0
 
 
 def _interactive() -> bool:
-    """Prompts only on a TTY; non-interactive runs fail instead of asking (§5.1)."""
+    """Prompts only with a TTY on both ends: a non-TTY stdout is report mode (§4.5), which
+    never prompts; non-interactive runs fail instead of asking (§5.1). identify also turns
+    prompts off for --report / --json."""
     try:
-        return sys.stdin.isatty()
+        return sys.stdin.isatty() and sys.stdout.isatty()
     except (AttributeError, ValueError):
         return False
 
@@ -330,7 +332,19 @@ def _files_tree(files: list[Path], hcfg, tag_of):
             sn.discs.append(d)
         d.files.append(node)
     show.seasons = list(seasons.values())
+    _mark_duplicates(show)
     return show
+
+
+def _mark_duplicates(tree) -> None:
+    """Same disc number twice in one season (§5.1: identical labels): see
+    hierarchy.parse.mark_duplicate_discs."""
+    from showvenist.hierarchy.parse import mark_duplicate_discs
+
+    for s in tree.seasons:
+        for p in mark_duplicate_discs(s, _season_title(s.number)):
+            if p not in tree.problems:
+                tree.problems.append(p)
 
 
 def _input_tree(paths: list[Path], hcfg, tag_of):
@@ -365,8 +379,11 @@ def _input_tree(paths: list[Path], hcfg, tag_of):
                     have.discs.append(d)
             known = {f.path for f in have.loose}
             have.loose += [f for f in s.loose if f.path not in known]
+    from showvenist.hierarchy.parse import disc_sort_key
+
+    _mark_duplicates(out)
     for s in out.seasons:
-        s.discs.sort(key=lambda d: (d.number is None, d.number or 0, d.key))
+        s.discs.sort(key=disc_sort_key)
     out.seasons.sort(key=lambda s: (s.number is None, s.number or 0))
     return out
 
@@ -468,24 +485,28 @@ def _resolve_show_choice(show_dir: Path, root: Path | None, interactive: bool):
 
 
 def _ordering_key(bundle, name: str) -> str | None:
-    from showvenist.eval.harness import find_ordering
+    from showvenist.session import ordering_key
 
-    o = find_ordering(bundle, name)
-    return None if o is None else next(k for k, v in bundle.orderings.items() if v is o)
+    return ordering_key(bundle, name)
 
 
 def _check_disc_order(tree, interactive: bool) -> None:
-    """§5.1 discs without numbers: suggest an order by folder creation time and ask;
-    non-interactive runs fail."""
-    from showvenist.hierarchy.parse import suggest_disc_order
+    """§5.1 discs without numbers (or with the same number twice): suggest an order by folder
+    creation time and ask; non-interactive runs fail. Side-lettered labels (disc1a, disc1b,
+    disc2a) are ordered by (number, side) without asking: that is no guess."""
+    from showvenist.hierarchy.parse import sides_order, suggest_disc_order
 
     for s in tree.seasons:
         if len(s.discs) < 2 or all(d.number is not None for d in s.discs):
             continue
+        by_side = sides_order(s.discs)
+        if by_side is not None:
+            s.discs = by_side
+            continue
         ordered = suggest_disc_order(list(s.discs))
         names = ", ".join(d.folder.name if d.folder else d.key for d in ordered)
-        msg = (f"{_season_title(s.number)}: discs without usable numbers; suggested order by "
-               f"folder creation time: {names}")
+        msg = (f"{_season_title(s.number)}: discs without usable numbers (or with the same "
+               f"number twice); suggested order by folder creation time: {names}")
         if not interactive:
             _fail(f"identify: {msg}. Rename the disc folders (Disc 1, Disc 2, ...); "
                   "non-interactive runs never guess.")
@@ -552,6 +573,7 @@ def identify(
     from showvenist.bundle.store import bundle_path
     from showvenist.config import cache_dir, load_config
     from showvenist.hierarchy.marker import jellyfin_hint, read_marker, suggest_folder_name
+    from showvenist.hierarchy.parse import is_duplicate_disc_problem
     from showvenist.report import exit_code, render_tables, to_json
     from showvenist.session import Session
 
@@ -565,7 +587,7 @@ def identify(
         wanted = _parse_episodes(episodes, season) if episodes else None
     except ValueError as e:
         _fail(str(e))
-    interactive = _interactive()
+    interactive = _interactive() and not (as_report or as_json)  # report mode never prompts
     paths = [Path(p) for p in paths]
 
     # --- show, marker ---
@@ -611,7 +633,12 @@ def identify(
     typer.echo(f"{shown}\n  show resolved by: {source}", err=True)
     if not tree.all_files():
         _fail("identify: no media files found")
-    if tree.problems:
+    wrote_marker = None
+    if (interactive and marker is None and show_dir is not None
+            and source in ("name", "pick", "tmdbid-hint")):
+        wrote_marker = _offer_marker(show_dir, slug, bundle, order)
+    hard = [p for p in tree.problems if not is_duplicate_disc_problem(p)]
+    if hard:
         if not interactive:
             _fail("identify: some folders could not be parsed (see Problems above); "
                   "non-interactive runs never guess. Rename them, or pass the files on their "
@@ -650,7 +677,6 @@ def identify(
         folder_hint = suggest_folder_name(bundle.show.title, bundle.show.year,
                                           bundle.show.ids.tmdb)
     reports = []
-    idle_codes: list[int] = []  # seasons with nothing to solve (all named or not ready)
     for snode, num in jobs:
         sub = replace(tree, seasons=[snode])
         try:
@@ -666,16 +692,15 @@ def identify(
         if len(jobs) > 1:
             typer.echo(f"-- {_season_title(num)}", err=True)
         sess.analyze(None, progress=progress)
-        if not sess.files and not sess.named_rows:
-            if not sess.not_ready and not sess.named:
-                _fail(f"identify: {_season_title(num)}: no readable media files")
-            typer.echo(f"{_season_title(num)}: nothing to analyze ({len(sess.not_ready)} not "
-                       f"ready, {len(sess.named)} named)", err=True)
-            idle_codes.append(2 if sess.not_ready else 0)
-            continue
-        sess.score()
-        sess.solve()
-        if mode != "off" and sess.files:
+        idle = not sess.files and not sess.named_rows
+        if idle:  # every file named, not ready or unreadable: reported, nothing solved
+            typer.echo(f"{_season_title(num)}: nothing to solve ({len(sess.not_ready)} not "
+                       f"ready, {len(sess.named)} named, {len(sess.errors)} unreadable)",
+                       err=True)
+        else:
+            sess.score()
+            sess.solve()
+        if not idle and mode != "off" and sess.files:
             scorer = _llm_scorer(cfg, cache)
             scorer.send = set(sess.llm_targets(mode))
             if scorer.send:
@@ -703,10 +728,21 @@ def identify(
                 f"Suggestion (not applied): rename the show folder {show_dir.name!r} to "
                 f"{folder_hint!r} so Jellyfin uses the same TMDB entry."
             )
-        if marker is None and source in ("name", "pick", "tmdbid-hint"):
+        if wrote_marker is not None:
+            report.notices.append(f"Wrote the marker file {wrote_marker}.")
+        elif marker is None and source in ("name", "pick", "tmdbid-hint"):
             report.notices.append(
                 f"Show resolved from the folder ({source}) as {slug!r}; no marker file was "
                 "written."
+            )
+        report.notices += [f"Folder and title tag disagree (the folder wins): {d}"
+                           for d in tree.disagreements]
+        untagged = [f for f in snode.loose if f.title_tag and f.tag_disc is None]
+        if untagged:
+            n = len(untagged)
+            report.notices.append(
+                f"{n} file{'s have' if n != 1 else ' has'} a title tag that names no disc "
+                f"(e.g. {untagged[0].title_tag!r}); they are solved without disc blocks."
             )
         reports.append(report)
 
@@ -721,8 +757,39 @@ def identify(
             if len(done) > 1:
                 typer.echo(f"== {_season_title(r.season)} ==")
             typer.echo(render_tables(r))
-    codes = [exit_code(r) for r in done] + idle_codes
-    raise typer.Exit(2 if 2 in codes else 0)
+    raise typer.Exit(_final_exit_code(done, exit_code))
+
+
+def _final_exit_code(reports, exit_code) -> int:
+    """§4.5: report.exit_code per season (0 / 2), widened for unreadable files: any of them
+    needs review (at least 2); when every file of the run was unreadable it's an error (1)."""
+    from showvenist.session import FLAG_UNREADABLE
+
+    rows = [f for r in reports for f in r.files]
+    bad = [f for f in rows if FLAG_UNREADABLE in f.flags]
+    if rows and len(bad) == len(rows):
+        return 1
+    codes = [exit_code(r) for r in reports]
+    return 2 if bad or 2 in codes else 0
+
+
+def _offer_marker(show_dir: Path, slug: str, bundle, order: str) -> Path | None:
+    """§5.4: the marker file is written on the first run after the user confirms the show
+    resolved from the folder (name, Jellyfin hint or pick). Never overwrites."""
+    from showvenist.hierarchy.marker import MARKER_NAME, write_marker
+    from showvenist.hierarchy.types import Marker
+
+    title = bundle.show.title
+    if not typer.confirm(f"Write {MARKER_NAME} for {title} in {show_dir}?", default=False,
+                         err=True):
+        return None
+    m = Marker(show=title, tmdb_id=bundle.show.ids.tmdb, bundle=slug,
+               language=bundle.show.language, naming_order=order)
+    try:
+        return write_marker(show_dir, m)
+    except (FileExistsError, OSError) as e:
+        typer.echo(f"marker not written: {e}", err=True)
+        return None
 
 
 @app.command("eval")
@@ -763,6 +830,12 @@ def eval_cmd(
         False, "--compare-blocks",
         help="Also run without blocks and print both metric blocks and the per-season delta",
     ),
+    start_order: str = typer.Option(
+        "aired", "--start-order",
+        help="Ordering every season starts from, as identify's --order (default 'aired': "
+        "ordering detection must find the release order itself). 'labels' starts from the "
+        "labels' own ordering, which hands detection the answer",
+    ),
 ) -> None:
     """Accuracy harness and weight fitting over a labeled manifest (LLM off unless asked).
 
@@ -775,6 +848,7 @@ def eval_cmd(
     from showvenist.eval.fit import fit_loso, format_fit_report, to_weights_config, write_weights
     from showvenist.eval.manifest import read_manifest
     from showvenist.eval.render import (
+        eval_caveats,
         fit_items,
         format_ablation,
         format_compare_blocks,
@@ -834,7 +908,7 @@ def eval_cmd(
     all_decisions, result = run_eval(
         rows, bundles, cfg, dirs, cache, progress=progress, on_group=on_group,
         scorers=_scorers(sig), llm_mode=mode, llm_factory=llm_factory, approve=approve,
-        use_blocks=not no_blocks,
+        use_blocks=not no_blocks, starting_order=start_order,
     )
     if compare_blocks:
         # the second run re-reads the analysis cache the first one just filled
@@ -842,11 +916,16 @@ def eval_cmd(
         _, plain = run_eval(
             rows, bundles, cfg, dirs, cache,
             scorers=_scorers(sig), llm_mode=mode, llm_factory=llm_factory, approve=approve,
-            use_blocks=False,
+            use_blocks=False, starting_order=start_order,
         )
         typer.echo(format_compare_blocks(result, plain, {g.key: g.n_discs for g in groups}))
     else:
         typer.echo(format_eval(result))
+    typer.echo(f"\nstarting order: {start_order}"
+               + (" (the labels' ordering: detection is handed the answer)"
+                  if start_order == "labels" else ""))
+    for line in eval_caveats(groups, blocks=not no_blocks):
+        typer.echo(line)
     if show_errors:
         from showvenist.eval.harness import resolve_labels
         from showvenist.eval.render import format_high_errors

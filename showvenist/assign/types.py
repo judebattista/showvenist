@@ -21,9 +21,14 @@ from dataclasses import dataclass, field
 from showvenist.scoring.types import FileConfidence
 
 # Placeholders until tuned by eval in M4 (spec §18): nats.
-UNCLAIMED_PENALTY_DEFAULT = 1.0  # u: a position inside a block that no file claims
+UNCLAIMED_PENALTY_DEFAULT = 2.0  # u: a position inside a block that no file claims
 GAP_PENALTY_DEFAULT = 2.0  # g: a position skipped between consecutive blocks
 ORDERING_THRESHOLD_DEFAULT = 15.0  # block total short of basic total by more than this: try others
+# Extra positions a complete disc's block may span beyond its ready-file count: a title MakeMKV
+# skipped (minimum length) or a two-part episode in one file leaves an episode with no file of
+# its own. Each extra position still costs u when unclaimed (§14 "Skipped titles").
+BLOCK_SLACK_DEFAULT = 1
+ORDERING_MARGIN_DEFAULT = 4.0
 
 
 @dataclass(frozen=True)
@@ -31,6 +36,10 @@ class BlockParams:
     unclaimed_penalty: float = UNCLAIMED_PENALTY_DEFAULT
     gap_penalty: float = GAP_PENALTY_DEFAULT
     ordering_threshold: float = ORDERING_THRESHOLD_DEFAULT
+    block_slack: int = BLOCK_SLACK_DEFAULT  # complete disc: block length ≤ files + block_slack
+    # another ordering must beat the starting one by more than this to be chosen (hysteresis);
+    # `ordering_threshold` is the separate bar for discarding blocks that fit badly
+    ordering_margin: float = ORDERING_MARGIN_DEFAULT
 
 
 @dataclass(frozen=True)
@@ -58,8 +67,8 @@ class OrderingChoice:
     ordering: str
     solution: BlockSolution
     tried: dict[str, float] = field(default_factory=dict)  # ordering -> total
-    switched: bool = False  # the starting order fitted badly and another was chosen
-    fits_nowhere: bool = False  # no ordering fits: warn and use the basic assignment
+    switched: bool = False  # another ordering fits and beats the start by > the threshold
+    fits_nowhere: bool = False  # nothing fits well enough: warn and use the start's basic
 
 
 __all__ = [

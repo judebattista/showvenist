@@ -64,7 +64,7 @@ def test_run_eval_two_seasons(corpus, tmp_path):
     assert ov.files == 7
     assert ov.top1 == 1.0
     assert ov.precision_high is not None and ov.precision_high.errors == 0
-    assert ov.precision_high.n >= 4 and ov.coverage_high >= 0.5
+    assert ov.precision_high.n >= 3 and ov.coverage_high >= 0.4
     assert ov.unmatched_recall == 1.0
     assert ov.episode_unknown_files == 1 and ov.episode_unknown_provable_errors == 0
     assert set(result.per_season) == {f"{SLUG}-S01", f"{SLUG}-S02"}
@@ -283,3 +283,51 @@ def test_group_tree_disc_sources():
         (3, ["e.mkv"]),  # the manifest's disc column wins over everything
     ]
     assert [f.path.name for f in s.loose] == ["d.mkv"]
+
+
+def test_starting_order_is_not_the_labels_and_eval_caveats(flattened, tmp_path):
+    """Decision 47's leaks: detection used to start from the labels' ordering; files with no
+    season folder take their hard season filter from the label; no labeled extras."""
+    from showvenist.bundle.schema import Ordering
+    from showvenist.eval.render import NO_EXTRAS_NOTE, eval_caveats
+
+    rows, bundles, bdirs = flattened
+    b = bundles[SLUG]
+    aired = b.orderings["aired"]
+    b = b.model_copy(update={"orderings": {
+        "aired": aired,
+        "chrono": Ordering(source="custom", type="chrono", entries=list(aired.entries))}})
+    rows = [ManifestRow(r.path, r.show, r.label, "chrono", r.disc) for r in rows]
+    started = {}
+    for start in (None, "labels", "aired", "AIRED"):
+        groups = []
+        _, result = run_eval(rows, {SLUG: b}, Config(), bdirs, AnalysisCache(tmp_path / "a.db"),
+                             on_group=groups.append, starting_order=start)
+        (g,) = groups
+        started[start] = (g.ordering, g.session.starting_ordering)
+        assert result.overall.top1 == 1.0
+    assert started == {None: ("chrono", "chrono"), "labels": ("chrono", "chrono"),
+                       "aired": ("aired", "aired"), "AIRED": ("aired", "aired")}
+    groups = []
+    _, result = run_eval(rows, {SLUG: b}, Config(), bdirs, None, on_group=groups.append,
+                         starting_order="nonesuch")
+    assert not groups and all("unknown ordering 'nonesuch'" in p.reason for p in result.problems)
+
+    groups = []
+    run_eval(rows, {SLUG: b}, Config(), bdirs, AnalysisCache(tmp_path / "a.db"),
+             on_group=groups.append, starting_order="aired")
+    assert groups[0].season_from_label == 4  # flattened: no `Season N` folder
+    assert eval_caveats(groups) == [
+        "4 files took their season from the label (no season folder)", NO_EXTRAS_NOTE]
+    assert eval_caveats(groups, blocks=False) == [
+        "4 files took their season from the label (no season folder)"]
+
+
+def test_eval_caveats_quiet_with_season_folders_and_extras(corpus, tmp_path):
+    from showvenist.eval.render import eval_caveats
+
+    rows, bundles, bdirs, _ = corpus
+    groups = []
+    run_eval(rows, bundles, Config(), bdirs, None, on_group=groups.append,
+             scorers=[DurationScorer()])
+    assert all(g.season_from_label == 0 for g in groups) and eval_caveats(groups) == []

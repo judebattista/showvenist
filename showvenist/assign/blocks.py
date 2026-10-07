@@ -11,10 +11,13 @@ The penalty is optimized jointly with the matching: − u · (L − matched) = �
 so the block's basic assignment runs on S + u and subtracts u·L. A disc marked incomplete has
 u = 0 and an open upper boundary.
 
-Block length bound: L ≤ len(files) + BLOCK_SLACK (spec: "bounded by the number of ready files").
-A disc can claim FEWER positions than it has files (extras, duplicates stay unmatched), never
-more than that bound; an incomplete disc may extend to the end of the season. Fixed blocks
-(confirmed history) are forced to their [a, b) and ignore the bound.
+Block length bound: L ≤ len(files) + params.block_slack (spec: "bounded by the number of ready
+files", plus slack). The slack lets a block cover an episode that has no file of its own: a
+title MakeMKV skipped (minimum length) or a two-part episode muxed as one file (§14). Each such
+position costs u when no file claims it, so the slack is a soft allowance, not a free one. A disc
+can claim FEWER positions than it has files (extras, duplicates stay unmatched). An incomplete
+disc may extend to the end of the season. Fixed blocks (confirmed history) are forced to their
+[a, b) and ignore the bound.
 
 Gaps: g per skipped position between consecutive blocks (and before the first block), free
 where `free_gap_before` is set, free before the first disc if its number is > 1, always free
@@ -24,7 +27,18 @@ Disc order: by `number` when every disc has one; if any disc is unnumbered, the 
 kept for all of them (the caller has ordered them, e.g. by folder creation time, §14).
 
 Loose files (no disc) are assigned AFTER the DP, by the basic assignment over the positions no
-disc file claimed (unclaimed positions inside blocks included). Their total is added.
+disc file claimed (unclaimed positions inside blocks included; their u is still charged). Their
+total is added.
+
+Limitation (sequential, not joint): a disc block may take an episode that a loose file holds
+more strongly, and the loose file then stays unmatched. The exact joint optimum couples every
+block through the loose files' choices (maximize over the loose files' injective choices λ of
+DP(disc files forbidden from λ's columns) + Σ S(loose, λ)), which is exponential in the number
+of loose files, so it is not solved. Confidence guards against it instead: a loose file's
+alternative is the best re-solve with that file PINNED to each other column c, disc files
+forbidden from c (blocks re-solved), so the column a disc took is a real alternative. When
+such an alternative beats the sequential total, Δ = 0 and the file goes to review with that
+column as runner-up; it is never reported as a confident extra.
 
 Rows of S in neither a disc nor `loose` are outside the solve: column −1, low confidence.
 """
@@ -39,8 +53,6 @@ import numpy as np
 from showvenist.assign.basic import assign_basic
 from showvenist.assign.types import BlockParams, BlockSolution, DiscSpec
 from showvenist.scoring.types import FileConfidence, level_of
-
-BLOCK_SLACK = 0  # extra positions a complete disc's block may span beyond its file count
 
 NEG_INF = float("-inf")
 Forbidden = set[tuple[int, int]] | frozenset[tuple[int, int]]
@@ -131,7 +143,7 @@ def _solve(
                 [d.fixed] if 0 <= d.fixed[0] <= d.fixed[1] <= E else []
             )
         else:
-            max_len = E if d.incomplete else len(d.files) + BLOCK_SLACK
+            max_len = E if d.incomplete else len(d.files) + params.block_slack
             spans = ((a, b) for a in range(E + 1) for b in range(a, min(E, a + max_len) + 1))
         for a, b in spans:
             if M[a] == NEG_INF:
@@ -195,6 +207,43 @@ def solve_blocks(
     return _solve(S, discs, loose, params, frozenset(forbidden or ()), _BlockCache(S, params))
 
 
+def _loose_alternative(
+    S: np.ndarray,
+    discs: Sequence[DiscSpec],
+    loose: Sequence[int],
+    params: BlockParams,
+    i: int,
+    sigma: int,
+    cache: _BlockCache,
+) -> tuple[float, int | None]:
+    """Best total with loose file i pinned to some column c ≠ σ(i) (−1 = unmatched) and every
+    disc file forbidden from c, blocks re-solved: (total, c), or (−inf, None) if none is
+    feasible. Columns are tried in order of an upper bound, which prunes exactly."""
+    E = S.shape[1]
+    disc_rows = [f for d in discs for f in d.files]
+    others = [f for f in loose if f != i]
+    dp_bound = _solve(S, discs, (), params, frozenset(), cache).total
+    others_bound = assign_basic(S[others]).total if others else 0.0
+    if not math.isfinite(dp_bound):
+        return NEG_INF, None
+    cands = sorted(
+        (c for c in range(-1, E) if c != sigma),
+        key=lambda c: -(S[i, c] if c >= 0 else 0.0),
+    )
+    best, runner = NEG_INF, None
+    for c in cands:
+        bound = dp_bound + (S[i, c] if c >= 0 else 0.0) + others_bound
+        if bound <= best:
+            break  # sorted by S[i, c]: every later bound is lower
+        forb = {(i, k) for k in range(-1, E) if k != c}
+        if c >= 0:
+            forb |= {(f, c) for f in disc_rows}
+        alt = _solve(S, discs, loose, params, frozenset(forb), cache)
+        if alt.total > best:
+            best, runner = alt.total, c
+    return best, runner
+
+
 def block_confidence(
     S: np.ndarray,
     discs: Sequence[DiscSpec],
@@ -203,21 +252,30 @@ def block_confidence(
     params: BlockParams = BlockParams(),  # noqa: B008
 ) -> list[FileConfidence]:
     """Δ_i = total − total with (i, σ(i)) forbidden, re-solving the block DP (§11.7). Block
-    scores are shared across the re-solves, so only the disc holding file i is re-evaluated."""
+    scores are shared across the re-solves, so only the disc holding file i is re-evaluated.
+
+    Loose files use the pinned joint alternative (module docstring). When the constrained
+    problem is infeasible (or the solution itself is), Δ = 0, level low, no runner-up: an
+    impossible alternative must never read as confidence."""
     S = np.asarray(S, dtype=float)
     F = S.shape[0]
     cache = _BlockCache(S, params)
-    in_solve = {f for d in discs for f in d.files} | set(loose)
+    loose_set = set(loose)
+    in_solve = {f for d in discs for f in d.files} | loose_set
     out: list[FileConfidence] = []
     for i in range(F):
         if i not in in_solve:
             out.append(FileConfidence(0.0, "low", None, None))
             continue
-        alt = _solve(S, discs, loose, params, frozenset({(i, solution.column[i])}), cache)
-        if not math.isfinite(alt.total) or not math.isfinite(solution.total):
-            delta, runner, rdelta = math.inf, None, None
+        sigma = solution.column[i]
+        if i in loose_set:
+            alt_total, runner = _loose_alternative(S, discs, loose, params, i, sigma, cache)
         else:
-            delta = max(0.0, solution.total - alt.total)
-            runner, rdelta = alt.column[i], delta
-        out.append(FileConfidence(delta, level_of(delta), runner, rdelta))
+            alt = _solve(S, discs, loose, params, frozenset({(i, sigma)}), cache)
+            alt_total, runner = alt.total, alt.column[i]
+        if not math.isfinite(alt_total) or not math.isfinite(solution.total):
+            out.append(FileConfidence(0.0, "low", None, None))
+            continue
+        delta = max(0.0, solution.total - alt_total)
+        out.append(FileConfidence(delta, level_of(delta), runner, delta))
     return out

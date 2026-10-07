@@ -189,10 +189,14 @@ def test_unparseable_level_fails_non_interactive(env, monkeypatch):
     assert "[1/" not in r.output  # stopped before analysis
     # interactive: report and ask; yes continues with the loose files
     monkeypatch.setattr(cli, "_interactive", lambda: True)
+    r = runner.invoke(cli.app, ["identify", str(show / "Season 1"), "-o", str(root)],
+                      input="n\ny\n")  # no marker; continue with the loose files
+    assert r.exit_code in (0, 2), r.output
+    assert "5 files:" in r.stdout
+    # --json is report mode: it never prompts, even on a TTY (§4.5)
     r = runner.invoke(cli.app, ["identify", str(show / "Season 1"), "-o", str(root),
                                 "--json"], input="y\n")
-    assert r.exit_code in (0, 2), r.output
-    assert len(report_of(r)["files"]) == 5
+    assert r.exit_code == 1 and "never guess" in r.stderr
 
 
 def test_discs_without_numbers_fail_non_interactive(env):
@@ -248,3 +252,128 @@ def test_explicit_files_and_allow_duplicates(env, sessions):
     rep = report_of(r)
     assert rep["season"] == 1 and {f["disc"] for f in rep["files"]} == {"Disc 2"}
     assert any("near-duplicate detection is not implemented" in n for n in rep["notices"])
+
+
+# ---- review fixes: unreadable files, marker, duplicate / side-lettered discs, notices --------
+
+
+def test_unreadable_file_is_reported_and_needs_review(env, monkeypatch):
+    root, show = env
+    monkeypatch.setattr(cli, "_mark_readiness", lambda tree, s: None)  # garbage reaches analysis
+    bad = show / "Season 1" / "Disc 2" / "t09.mkv"
+    bad.write_bytes(b"\x00 not matroska " * 400)
+    age(bad)
+    r = ident(root, show / "Season 1", "--json")
+    assert r.exit_code == 2, r.output  # one unreadable file among good ones: review, not 0
+    rep = report_of(r)
+    row = next(f for f in rep["files"] if f["path"].endswith("t09.mkv"))
+    assert row["flags"] == ["unreadable"] and row["confidence"]["level"] == "low"
+    assert row["disc"] == "Disc 2"
+    assert any(n.startswith("t09.mkv: unreadable") for n in rep["notices"])
+    assert rep["summary"]["files"] == 5
+
+
+def test_every_file_unreadable_is_an_error(env, monkeypatch):
+    root, show = env
+    monkeypatch.setattr(cli, "_mark_readiness", lambda tree, s: None)
+    d = show / "Season 1" / "Disc 1"
+    for f in d.iterdir():
+        f.write_bytes(b"\x00 not matroska " * 400)
+        age(f)
+    r = ident(root, d, "--json", "--season", "1")
+    assert r.exit_code == 1, r.output
+    rep = report_of(r)
+    assert len(rep["files"]) == 2 and all(f["flags"] == ["unreadable"] for f in rep["files"])
+
+
+def test_marker_written_after_confirmation(env, monkeypatch):
+    from showvenist.hierarchy.marker import read_marker
+
+    root, show = env
+    monkeypatch.setattr(cli, "_interactive", lambda: True)
+    asked = []
+
+    def confirm(text, default=False, err=False):
+        asked.append(text)
+        return False
+
+    monkeypatch.setattr(cli.typer, "confirm", confirm)
+    r = ident(root, show / "Season 1")
+    assert r.exit_code in (0, 2), r.output
+    assert asked == [f"Write {MARKER_NAME} for Synth Show in {show}?"]
+    assert not (show / MARKER_NAME).exists() and "no marker file was written" in r.stdout
+
+    monkeypatch.setattr(cli.typer, "confirm", lambda *a, **k: True)
+    r = ident(root, show / "Season 1", "--order", "dvd")
+    assert r.exit_code in (0, 2), r.output
+    m = read_marker(show)
+    assert (m.show, m.bundle, m.tmdb_id, m.naming_order) == ("Synth Show", SLUG, 4242, "dvd")
+    assert f"Wrote the marker file {show / MARKER_NAME}" in r.stdout
+
+    # later runs read it: no question, never overwritten
+    before = (show / MARKER_NAME).read_text()
+    monkeypatch.setattr(cli.typer, "confirm", confirm)
+    asked.clear()
+    r = ident(root, show / "Season 1")
+    assert "show resolved by: marker" in r.stderr and asked == []
+    assert (show / MARKER_NAME).read_text() == before
+
+
+def test_marker_not_offered_in_report_mode(env, monkeypatch):
+    root, show = env
+    monkeypatch.setattr(cli, "_interactive", lambda: True)
+    monkeypatch.setattr(cli.typer, "confirm", lambda *a, **k: pytest.fail("prompted"))
+    for flag in ("--json", "--report"):
+        r = ident(root, show / "Season 1", flag)
+        assert r.exit_code in (0, 2), r.output
+    assert not (show / MARKER_NAME).exists()
+
+
+def test_duplicate_disc_numbers_take_the_unnumbered_path(env, monkeypatch, sessions):
+    root, show = env
+    s1 = show / "Season 1"
+    (s1 / "Disc 2").rename(s1 / "DISC_1")  # 'Disc 1' and 'DISC_1': both parse as disc 1
+    r = ident(root, s1, "--json")
+    assert r.exit_code == 1, r.output
+    assert "same number twice" in r.stderr and "never guess" in r.stderr
+    assert "disc number 1 appears twice" in r.stderr  # recorded in the tree's problems
+    assert "[1/" not in r.output
+    # interactive: the creation-time order is suggested and confirmed, then solved
+    os.utime(s1 / "Disc 1", (1000, 1000))
+    monkeypatch.setattr(cli, "_interactive", lambda: True)
+    answers = iter([False, True])  # no marker; yes to the order
+    monkeypatch.setattr(cli.typer, "confirm", lambda *a, **k: next(answers))
+    r = ident(root, s1)
+    assert r.exit_code in (0, 2), r.output
+    assert "suggested order by folder creation time" in r.stderr
+    sn = sessions[-1].season_node
+    assert all(d.number is None and d.order_source == "creation-time" for d in sn.discs)
+
+
+def test_side_lettered_discs_need_no_prompt(env, sessions):
+    root, show = env
+    s1 = show / "Season 1"
+    (s1 / "Disc 1").rename(s1 / "disc1a")
+    (s1 / "Disc 2").rename(s1 / "disc1b")
+    r = ident(root, s1, "--json")
+    assert r.exit_code in (0, 2), r.output
+    assert [d.key for d in sessions[-1].solution.discs] == ["disc1a", "disc1b"]
+    assert sessions[-1].solution.used_blocks
+    assert {v[1] for v in episodes(report_of(r)).values()} == {1, 2, 3, 4}
+
+
+def test_disagreements_and_discless_tags_are_notices(env, monkeypatch):
+    root, show = env
+    s1 = show / "Season 1"
+    loose = s1 / "t50.mkv"
+    shutil.copyfile(s1 / "Disc 1" / "t00.mkv", loose)
+    age(loose)
+    tags = {"Disc 1": "SYNTH SHOW SEASON 1 DISC 2", "Season 1": "UPHE_UPB75_112369A"}
+    monkeypatch.setattr(cli, "_tag_reader", lambda cache: lambda p: tags.get(p.parent.name))
+    r = ident(root, s1, "--json")
+    assert r.exit_code in (0, 2), r.output
+    notes = report_of(r)["notices"]
+    assert any(n.startswith("Folder and title tag disagree") and "Disc 1: folder says disc 1"
+               in n for n in notes)
+    assert "1 file has a title tag that names no disc (e.g. 'UPHE_UPB75_112369A'); they are " \
+           "solved without disc blocks." in notes

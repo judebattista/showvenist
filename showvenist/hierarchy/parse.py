@@ -137,6 +137,68 @@ def parse_tag_season(tag: str, patterns: Sequence[str] | None = None) -> int | N
     return ref.season if ref else None
 
 
+DUPLICATE_DISC_PROBLEM = "disc number {number} appears twice in {where!r} ({keys})"
+_SIDE_RE = re.compile(rf"{_B}dis[ck]{_SEP}(\d{{1,2}})([a-z]){_E}", re.IGNORECASE)
+
+
+def disc_side(ref: DiscRef | None) -> tuple[int, str] | None:
+    """(number, side) of a side-lettered label such as 'disc1a' / 'Disc 2B' (double-sided
+    DVDs): DiscRef has no field for the side, so such a disc keeps number None and this is its
+    secondary key. None for any other label."""
+    if ref is None or ref.number is not None:
+        return None
+    m = _SIDE_RE.search(ref.label)
+    return (int(m.group(1)), m.group(2).lower()) if m else None
+
+
+def disc_sort_key(d: DiscNode) -> tuple:
+    """Numbered discs by number, then side-lettered ones by (number, side), then the rest by
+    natural name."""
+    side = disc_side(d.ref)
+    return (d.number is None, d.number or 0, side is None, side or (0, ""), _natural(d.key))
+
+
+def sides_order(discs: Sequence[DiscNode]) -> list[DiscNode] | None:
+    """When every disc of a season is side-lettered with distinct (number, side) keys, their
+    order by that key (no guess: 1a < 1b < 2a); else None (the creation-time path, §5.1)."""
+    keys = [disc_side(d.ref) for d in discs]
+    if not discs or any(k is None for k in keys) or len(set(keys)) != len(keys):
+        return None
+    out = sorted(discs, key=disc_sort_key)
+    for d in out:
+        d.order_source = "name"
+    return out
+
+
+def mark_duplicate_discs(node: SeasonNode, where: str) -> list[str]:
+    """Discs of one season that parse to the same number (two 'Disc 1' folders, identical
+    volume labels): the number can't order them, so each loses it (number None, order_source
+    'name') and the caller takes the unnumbered-disc path (suggest_disc_order by creation time,
+    confirmed by the user, §5.1: never guessed). Returns one problem line per repeated number,
+    formatted with DUPLICATE_DISC_PROBLEM."""
+    by_num: dict[int, list[DiscNode]] = {}
+    for d in node.discs:
+        if d.number is not None:
+            by_num.setdefault(d.number, []).append(d)
+    out: list[str] = []
+    for num, ds in by_num.items():
+        if len(ds) < 2:
+            continue
+        out.append(DUPLICATE_DISC_PROBLEM.format(
+            number=num, where=where, keys=", ".join(repr(d.key) for d in ds)))
+        for d in ds:
+            assert d.ref is not None
+            d.ref = replace(d.ref, number=None)
+            d.order_source = "name"
+    return out
+
+
+def is_duplicate_disc_problem(problem: str) -> bool:
+    """A problem line from mark_duplicate_discs (handled like unnumbered discs, not as an
+    unparseable level)."""
+    return problem.startswith("disc number ") and " appears twice in " in problem
+
+
 def _natural(s: str) -> list[tuple[int, int | str]]:
     return [(0, int(t)) if t.isdigit() else (1, t.lower()) for t in re.split(r"(\d+)", s) if t]
 
@@ -285,16 +347,7 @@ class _Builder:
         return node
 
     def check_duplicates(self, node: SeasonNode, where: str) -> None:
-        seen: dict[int, str] = {}
-        for d in node.discs:
-            if d.number is None:
-                continue
-            if d.number in seen:
-                self.problems.append(
-                    f"disc number {d.number} appears twice in {where!r} "
-                    f"({seen[d.number]!r}, {d.key!r})"
-                )
-            seen.setdefault(d.number, d.key)
+        self.problems += mark_duplicate_discs(node, where)
 
     def sort(self, seasons: list[SeasonNode]) -> None:
         seasons.sort(
@@ -305,7 +358,7 @@ class _Builder:
             )
         )
         for s in seasons:
-            s.discs.sort(key=lambda d: (d.number is None, d.number or 0, _natural(d.key)))
+            s.discs.sort(key=disc_sort_key)
 
 
 def build_tree(

@@ -76,9 +76,11 @@ class HierarchyConfig(_Section):
 class BlocksConfig(_Section):
     """[blocks]: placeholders until tuned by eval (spec §18)."""
 
-    unclaimed_penalty: float = 1.0
+    unclaimed_penalty: float = 2.0
     gap_penalty: float = 2.0
     ordering_threshold: float = 15.0
+    ordering_margin: float = 4.0  # another ordering must beat the starting one by this much
+    block_slack: int = 1  # positions a disc block may span beyond its file count (skipped titles)
 
 
 class Config(_Section):

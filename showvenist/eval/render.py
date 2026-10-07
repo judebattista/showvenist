@@ -64,6 +64,25 @@ def format_eval(result: EvalResult) -> str:
     return "\n".join(lines)
 
 
+NO_EXTRAS_NOTE = (
+    "no labeled extras: disc file counts equal episode counts, so the block lift is an upper bound"
+)
+
+
+def eval_caveats(groups: Sequence[GroupRun], blocks: bool = True) -> list[str]:
+    """Lines that qualify the numbers (decision 47's measurements had both leaks): files whose
+    hard season filter came from their label, and, with blocks, a corpus with no labeled
+    extras (every disc holds exactly its episodes, which flatters the block model)."""
+    out: list[str] = []
+    n = sum(g.season_from_label for g in groups)
+    if n:
+        out.append(f"{n} file{'s' if n != 1 else ''} took their season from the label "
+                   "(no season folder)")
+    if blocks and groups and not any(lab.kind == "extra" for g in groups for lab in g.labels):
+        out.append(NO_EXTRAS_NOTE)
+    return out
+
+
 def _item(r: EvidenceRow, season_key: str, regime: str, names: Iterable[str]) -> FitItem | None:
     llr = {k: r.llr[k] for k in names if k in r.llr and r.available.get(k, False)}
     common = dict(season_key=season_key, regime=regime, llr=llr, n_candidates=len(r.candidates))

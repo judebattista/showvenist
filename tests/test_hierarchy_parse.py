@@ -6,13 +6,17 @@ import pytest
 from showvenist.config import HierarchyConfig
 from showvenist.hierarchy.parse import (
     build_tree,
+    disc_side,
+    is_duplicate_disc_problem,
+    mark_duplicate_discs,
     parse_disc,
     parse_named,
     parse_season,
     parse_tag_season,
+    sides_order,
     suggest_disc_order,
 )
-from showvenist.hierarchy.types import DiscNode, DiscRef, NamedEpisode
+from showvenist.hierarchy.types import DiscNode, DiscRef, NamedEpisode, SeasonNode
 from tests.fixtures import hierarchy_cases as C
 
 
@@ -144,9 +148,45 @@ def test_build_tree_unparseable_show_level(tmp_path):
 
 
 def test_duplicate_disc_numbers_reported(tmp_path):
-    tags = _mk(tmp_path, [("S/Season1/disc1/a.mkv", ""), ("S/Season1/D1/b.mkv", "")])
+    tags = _mk(tmp_path, [("S/Season1/disc1/a.mkv", ""), ("S/Season1/D1/b.mkv", ""),
+                          ("S/Season1/disc2/c.mkv", "")])
     show = build_tree(tmp_path / "S", config=HierarchyConfig(), tag_of=tags.get)
-    assert any("twice" in p for p in show.problems)
+    (dup,) = show.problems
+    assert "twice" in dup and is_duplicate_disc_problem(dup)
+    assert not is_duplicate_disc_problem("cannot parse disc folder 'x' in 'y'")
+    # §5.1 never guesses: two 'disc 1's lose their number (the unnumbered-disc path:
+    # creation-time order, confirmed by the user); disc 2 keeps its own
+    (s1,) = show.seasons
+    nums = {d.key: d.number for d in s1.discs}
+    assert nums == {"D1": None, "disc1": None, "disc2": 2}
+    assert all(d.ref.label for d in s1.discs)
+
+
+def test_mark_duplicate_discs_flat_tags():
+    a = DiscNode("tag:x", DiscRef(1, 1, "SHOW S1 DISC 1", "tag"), None)
+    b = DiscNode("tag:y", DiscRef(1, 1, "SHOW S01 DISC 1", "tag"), None)
+    node = SeasonNode(1, None, discs=[a, b])
+    (msg,) = mark_duplicate_discs(node, "Season 1")
+    assert "'tag:x', 'tag:y'" in msg and a.number is None and b.number is None
+    assert mark_duplicate_discs(node, "Season 1") == []  # nothing left to mark
+
+
+def test_side_lettered_discs_sort_by_number_then_side(tmp_path):
+    files = [(f"WS/Season 1/{k}/t.mkv", "") for k in ("disc2a", "disc1b", "disc10a", "disc1a")]
+    tags = _mk(tmp_path, files)
+    show = build_tree(tmp_path / "WS", config=HierarchyConfig(), tag_of=tags.get)
+    (s1,) = show.seasons
+    # DiscRef has no side field (contract): number stays None, the side is a secondary key
+    assert all(d.number is None for d in s1.discs)
+    assert [d.key for d in s1.discs] == ["disc1a", "disc1b", "disc2a", "disc10a"]
+    assert disc_side(s1.discs[1].ref) == (1, "b") and disc_side(DiscRef(1)) is None
+    assert [d.key for d in sides_order(list(reversed(s1.discs)))] == [
+        "disc1a", "disc1b", "disc2a", "disc10a"]
+    assert all(d.order_source == "name" for d in s1.discs)
+    # a disc with no side, or two identical sides, is not ordered this way
+    assert sides_order([*s1.discs, DiscNode("Disc A", DiscRef(None, None, "Disc A"), None)]) \
+        is None
+    assert sides_order([s1.discs[0], DiscNode("x", s1.discs[0].ref, None)]) is None
 
 
 def test_suggest_disc_order_without_created_keeps_key_order():

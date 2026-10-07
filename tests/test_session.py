@@ -206,6 +206,31 @@ def test_unreadable_file_is_recorded(tmp_path, rips):
     assert [f.path for f in s.files] == [rips["e1"]]
     assert [x[0] for x in seen] == [1, 2] and seen[0][3] is not None and seen[1][3] is None
     assert _assigned(s.solve(), rips["e1"]) == "S01E01"
+    # the report keeps it: a low-confidence row flagged unreadable, the reason in a notice
+    from showvenist.report import exit_code
+    from showvenist.session import FLAG_UNREADABLE
+
+    rep = s.report()
+    row = next(r for r in rep.files if r.path == str(bad))
+    assert row.flags == [FLAG_UNREADABLE] and row.confidence.level == "low"
+    assert any(n.startswith("bad.mkv: unreadable (") for n in rep.notices)
+    assert exit_code(rep) == 2 and rep.summary.files == 2
+
+
+def test_only_unreadable_files_report_without_solving(tmp_path):
+    from showvenist.session import FLAG_UNREADABLE
+
+    bad = tmp_path / "bad.mkv"
+    bad.write_bytes(b"not a matroska file" * 100)
+    copy = tmp_path / "copy.mkv"
+    copy.write_bytes(bad.read_bytes())  # an exact copy of an unreadable file
+    s = Session(synth_bundle(), None, Config(), season=1)
+    s.analyze([bad, copy])
+    assert set(s.errors) == {bad, copy} and not s.duplicates
+    rep = s.report()
+    assert s.solution is None and rep.summary.files == 2 and rep.summary.low == 2
+    assert all(r.flags == [FLAG_UNREADABLE] for r in rep.files)
+    assert any("copy.mkv: unreadable (exact copy of bad.mkv" in n for n in rep.notices)
 
 
 def test_disc_of():

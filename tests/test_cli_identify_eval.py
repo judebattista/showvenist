@@ -76,6 +76,37 @@ def test_eval_prints_metrics_and_fit(tmp_path, monkeypatch):
     r = runner.invoke(cli.app, ["eval", str(manifest), "-o", str(root)])
     assert r.exit_code == 0, r.output
     assert "OVERALL" in r.output and "top-1" in r.output
+    # detection starts from 'aired', not from the labels' ordering; the caveats are printed
+    assert "starting order: aired\n" in r.output
+    assert "no labeled extras: disc file counts equal episode counts, so the block lift is " \
+           "an upper bound" in r.output
+    assert "took their season from the label" not in r.output  # Season 1 folder
+    r = runner.invoke(cli.app, ["eval", str(manifest), "-o", str(root), "--start-order",
+                                "labels", "--no-blocks"])
+    assert r.exit_code == 0, r.output
+    assert "starting order: labels (the labels' ordering" in r.output
+    assert "no labeled extras" not in r.output  # without blocks there is no block lift
+
+
+def test_eval_start_order_reaches_run_eval(tmp_path, monkeypatch):
+    from showvenist.eval import runner as runner_mod
+
+    root, rips = setup(tmp_path, monkeypatch)
+    manifest = tmp_path / "m.csv"
+    manifest.write_text("path,show,label,order,disc\n"
+                        f"{rips}/t01.mkv,synth-show-2000,S01E01,aired,\n")
+    seen = []
+    real = runner_mod.run_eval
+
+    def spy(*a, **kw):
+        seen.append(kw.get("starting_order"))
+        return real(*a, **kw)
+
+    monkeypatch.setattr(runner_mod, "run_eval", spy)
+    for args, want in (([], "aired"), (["--start-order", "labels"], "labels")):
+        r = runner.invoke(cli.app, ["eval", str(manifest), "-o", str(root), *args])
+        assert r.exit_code == 0, r.output
+        assert seen[-1] == want
 
 
 # ---- review fixes: identify flags ---------------------------------------------------------------

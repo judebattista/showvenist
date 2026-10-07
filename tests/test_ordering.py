@@ -156,3 +156,37 @@ def test_wrong_season_filter_is_detected_even_when_blocks_and_basic_fail_togethe
 
 def test_default_threshold_is_the_tuned_value():
     assert BlockParams().ordering_threshold == 15.0  # decision 47
+
+
+def test_non_fitting_ordering_never_wins_even_with_a_higher_total():
+    """Neither ordering fits (blocks far below basic in both); B's block total beats A's by
+    more than the threshold. Switching to B would hide §11.6 step 4's warning: the result is
+    fits_nowhere with A's basic assignment."""
+    from showvenist.assign.basic import assign_basic
+    from showvenist.assign.blocks import solve_blocks
+    from showvenist.assign.ordering import _basic
+
+    discs = [DiscSpec("d1", (0, 1), 1), DiscSpec("d2", (2, 3), 2)]
+
+    def matrix(w):
+        # disc 1's file 0 is on the last episode, disc 2's file 3 on the first: blocks in disc
+        # order can keep only one of them; the basic assignment keeps both
+        S = np.full((4, 4), -1.0)
+        S[0, 3] = S[3, 0] = w
+        return S
+
+    A, B = matrix(20.0), matrix(40.0)
+
+    def build(name):
+        return (A if name == "a" else B), discs, ()
+
+    sa, sb = solve_blocks(A, discs, (), P), solve_blocks(B, discs, (), P)
+    thr = P.ordering_threshold
+    assert sa.total < _basic(A, discs, ()).total - thr  # A does not fit
+    assert sb.total < _basic(B, discs, ()).total - thr  # B does not fit
+    assert sb.total > sa.total + thr  # ... but B's block total is clearly higher
+
+    choice = detect_ordering(build, ["a", "b"], "a", P)
+    assert choice.fits_nowhere and not choice.switched and choice.ordering == "a"
+    assert not choice.solution.used_blocks
+    assert choice.solution.column == assign_basic(A).column

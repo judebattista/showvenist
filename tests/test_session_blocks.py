@@ -484,3 +484,112 @@ def test_24_files_6_discs_end_to_end_and_fast_resolve(tmp_path, capsys):
         print(f"\n24 files / 6 discs: analyze {t1 - t0:.2f}s, first solve {t2 - t1:.2f}s, "
               f"pin+unpin re-solves {t4 - t3:.3f}s")
     assert (t4 - t3) < (t2 - t1)
+
+
+# ---- review fixes: Δ with pins is an exact re-solve; LLM window after a missing disc ----------
+
+
+def _brute_blocks(S, discs, params, forbidden) -> float:
+    """The §11.5 objective by exhaustion: every one-to-one assignment (or unmatched) of the
+    disc files, every placement of ordered, non-overlapping blocks [a_d, b_d) of length at most
+    files + slack holding each disc's matched files; − u per unclaimed position in a block,
+    − g per skipped position before and between blocks (discs numbered 1, 2, ...; complete)."""
+    import itertools
+    import math
+
+    import showvenist.assign.blocks as blocks_mod
+
+    F, E = S.shape
+    u, g = params.unclaimed_penalty, params.gap_penalty
+    slack = getattr(params, "block_slack", getattr(blocks_mod, "BLOCK_SLACK", 0))
+    spans = [[(a, b) for a in range(E + 1) for b in range(a, min(E, a + len(d.files) + slack) + 1)]
+             for d in discs]
+    best = -math.inf
+    for cols in itertools.product(range(-1, E), repeat=F):
+        used = [c for c in cols if c >= 0]
+        if len(set(used)) != len(used) or any((i, c) in forbidden for i, c in enumerate(cols)):
+            continue
+        base = sum(float(S[i, c]) for i, c in enumerate(cols) if c >= 0)
+        for placement in itertools.product(*spans):
+            prev, pen, ok = 0, 0.0, True
+            for d, (a, b) in zip(discs, placement, strict=True):
+                if a < prev or any(not (cols[r] < 0 or a <= cols[r] < b) for r in d.files):
+                    ok = False
+                    break
+                claimed = sum(1 for r in d.files if cols[r] >= 0)
+                pen += u * (b - a - claimed) + g * (a - prev)
+                prev = b
+            if ok:
+                best = max(best, base - pen)
+    return best
+
+
+def test_pinned_delta_loop_equals_exact_resolve(tmp_path):
+    layout = {"Disc 1": ["a1.mkv", "a2.mkv"], "Disc 2": ["b1.mkv", "b2.mkv"]}
+    season = make_season(tmp_path / "rips", layout)
+    table = {
+        "a1.mkv": {"e1": 3.0, "e2": 1.0}, "a2.mkv": {"e2": 2.0, "e3": 1.5},
+        "b1.mkv": {"e3": 2.5, "e4": 1.0}, "b2.mkv": {"e4": 0.5, "e5": 2.0},
+    }
+    s = session_for(season, plain_bundle(5), table, tmp_path)
+    sol = s.pin(season / "Disc 2" / "b1.mkv", "e4")  # against b1's best evidence (e3)
+    assert sol.used_blocks and not sol.switched
+    S0 = s._fused(s.ordering).S
+    F, E = S0.shape
+    pins = s._row_pins(s.candidates)
+    forb = s._pin_forbidden(pins, F, E)
+    discs = sorted(sol.discs, key=lambda d: d.number)
+    total = _brute_blocks(S0, discs, s.block_params, forb)
+    assert sol.assignment.total == pytest.approx(total)
+    b1 = next(i for i, f in enumerate(sol.files) if f.path.name == "b1.mkv")
+    assert sol.assignment.column[b1] == 3 and sol.confidences[b1].level == "high"
+    checked = 0
+    for i in range(F):
+        if i in pins:
+            continue
+        alt = _brute_blocks(S0, discs, s.block_params, forb | {(i, sol.assignment.column[i])})
+        assert sol.confidences[i].delta == pytest.approx(max(0.0, total - alt)), sol.files[i]
+        checked += 1
+    assert checked == 3
+
+
+def test_llm_window_after_a_missing_disc_runs_to_the_season_end(tmp_path):
+    from showvenist.scoring.llm import LlmScorer
+
+    # disc 2 was not ripped: disc 3's window can't be counted from disc 1's end
+    layout = {"Disc 1": ["a1.mkv", "a2.mkv", "a3.mkv"], "Disc 3": ["c1.mkv", "c2.mkv", "c3.mkv"]}
+    season = make_season(tmp_path / "rips", layout)
+    table = {"a1.mkv": {"e1": STRONG}, "a2.mkv": {"e2": STRONG}, "a3.mkv": {"e3": STRONG},
+             "c1.mkv": {"e7": STRONG}, "c2.mkv": {"e8": 1.0}, "c3.mkv": {"e9": STRONG}}
+    s = session_for(season, plain_bundle(9), table, tmp_path)
+    sol = s.solve()
+    assert [d.number for d in sol.discs] == [1, 3] and sol.discs[1].free_gap_before
+    c2 = next(i for i, f in enumerate(s.files) if f.path.name == "c2.mkv")
+    windows = s.llm_windows()
+    assert [sorted(c) for _, c in windows] == [[0, 1, 2], [3, 4, 5, 6, 7, 8]]
+    fake = WindowFake({"c2": 8})
+    llm = LlmScorer(fake, send_both_orders=False)
+    llm.send = {c2}
+    sol = s.apply_llm(llm)
+    ((tok, labels),) = fake.calls
+    assert tok == "c2" and labels == [f"S01E{k:02d}" for k in range(4, 10)]
+    assert assigned(sol, "c2.mkv") == "e8"
+
+
+def test_named_files_read_in_the_marker_naming_order_by_type(tmp_path):
+    from showvenist.hierarchy.types import Marker
+
+    layout = {"Disc 1": ["a1.mkv", "a2.mkv"]}
+    season = make_season(tmp_path / "rips", layout)
+    named = season / "Disc 1" / "synth_s01e02.mkv"
+    named.write_bytes(b"never analyzed" * 50)
+    b = plain_bundle(4, {"chrono": [1, 3, 2, 4]})
+    b = b.model_copy(update={"orderings": {
+        **b.orderings, "chrono": b.orderings["chrono"].model_copy(update={"type": "dvd"})}})
+    # naming_order given as an ordering type ('dvd', as a Jellyfin keyword) while --order is
+    # aired: names are read in the naming order (S01E02 there is e3), not in --order
+    s = session_for(season, b, {"a1.mkv": {"e1": STRONG}, "a2.mkv": {"e2": STRONG}}, tmp_path,
+                    marker=Marker(show="Synth Show", naming_order="dvd"))
+    assert s.starting_ordering == "aired" and s._named_order() == "chrono"
+    sol = s.solve()
+    assert assigned(sol, "synth_s01e02.mkv") == "e3"

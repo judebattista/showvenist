@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import itertools
 import math
 import time
 
@@ -10,68 +9,109 @@ import numpy as np
 import pytest
 
 import showvenist.assign.blocks as blocks_mod
-from showvenist.assign.blocks import BLOCK_SLACK, block_confidence, solve_blocks
+from showvenist.assign.blocks import block_confidence, solve_blocks
 from showvenist.assign.types import BlockParams, DiscSpec
 
-P = BlockParams()  # u = 1, g = 2
+P = BlockParams()  # u = 1, g = 2, slack 2
 
 
-# ---- brute force over the exact model -----------------------------------------------------------
+# ---- independent reference: the model of spec §11.5 written out by enumeration -------------------
+# Nothing here is shared with the solver: placements, the length bound, gap and unclaimed
+# accounting are re-derived from the spec text. Skipped disc numbers are read from the numbers
+# themselves (the flag is only used for unnumbered discs, whose skips the solver can't see).
 
 
-def _disc_order(discs):
-    if all(d.number is not None for d in discs):
-        return sorted(discs, key=lambda d: d.number)
-    return list(discs)
+def _ref_order(discs):
+    """§11.5: discs sorted by parsed number. §14: unnumbered discs keep the confirmed order."""
+    if any(d.number is None for d in discs):
+        return list(discs)
+    return sorted(discs, key=lambda d: d.number)
 
 
-def _best_in_block(S, d, a, b, params, forbidden):
-    """Enumerate every injective map of the disc's files into [a, b) ∪ {unmatched}."""
+def _ref_matchings(files, a, b):
+    """Every injective map of `files` into positions [a, b) ∪ {unmatched}."""
+    if not files:
+        yield ()
+        return
+    for rest in _ref_matchings(files[1:], a, b):
+        taken = {c for c in rest if c != -1}
+        yield (-1, *rest)
+        for c in range(a, b):
+            if c not in taken:
+                yield (c, *rest)
+
+
+def _ref_block(S, d, a, b, params, forbidden):
+    """block_score = best matching − u · (positions in [a, b) no file claims); u = 0 if
+    incomplete."""
     u = 0.0 if d.incomplete else params.unclaimed_penalty
     best, arg = -math.inf, None
-    for cols in itertools.product([-1, *range(a, b)], repeat=len(d.files)):
-        used = [c for c in cols if c >= 0]
-        if len(used) != len(set(used)):
-            continue
+    for cols in _ref_matchings(d.files, a, b):
         if any((f, c) in forbidden for f, c in zip(d.files, cols, strict=True)):
             continue
-        v = sum(S[f, c] for f, c in zip(d.files, cols, strict=True) if c >= 0)
-        v -= u * ((b - a) - len(used))
+        claimed = sum(1 for c in cols if c != -1)
+        v = sum(S[f, c] for f, c in zip(d.files, cols, strict=True) if c != -1)
+        v -= u * ((b - a) - claimed)
         if v > best:
             best, arg = v, cols
     return best, arg
 
 
-def _spans(d, E):
+def _ref_placements(order, E, slack, k=0, prev_b=0):
+    """Every in-order, non-overlapping choice of one block per disc. A fixed block is forced; a
+    complete disc spans at most files + slack positions; an incomplete one is open-ended."""
+    if k == len(order):
+        yield ()
+        return
+    d = order[k]
     if d.fixed is not None:
-        return [d.fixed]
-    max_len = E if d.incomplete else len(d.files) + BLOCK_SLACK
-    return [(a, b) for a in range(E + 1) for b in range(a, min(E, a + max_len) + 1)]
+        a, b = d.fixed
+        options = [(a, b)] if prev_b <= a <= b <= E else []
+    else:
+        options = [
+            (a, b)
+            for a in range(prev_b, E + 1)
+            for b in range(a, E + 1)
+            if d.incomplete or b - a <= len(d.files) + slack
+        ]
+    for a, b in options:
+        for rest in _ref_placements(order, E, slack, k + 1, b):
+            yield ((a, b), *rest)
+
+
+def _ref_gap_cost(order, k, prev_b, a, g):
+    """g per skipped position before disc k, free where numbers skip and before a first disc
+    numbered > 1. Nothing is ever charged after the last disc (placements may end anywhere)."""
+    d = order[k]
+    if k == 0:
+        if d.number is not None and d.number > 1:
+            return 0.0
+        return g * a
+    p = order[k - 1]
+    if d.number is not None and p.number is not None:
+        skip = d.number > p.number + 1
+    else:
+        skip = d.free_gap_before
+    return 0.0 if skip else g * (a - prev_b)
 
 
 def _brute(S, discs, params=P, forbidden=frozenset()):
-    """(best total, column) over every in-order placement of blocks and every matching."""
+    """(best total, column) of the block model over every placement and every matching."""
     F, E = S.shape
-    order = _disc_order(discs)
+    order = _ref_order(discs)
     memo = {}
 
-    def inner(k, a, b):
-        key = (k, a, b)
-        if key not in memo:
-            memo[key] = _best_in_block(S, order[k], a, b, params, forbidden)
-        return memo[key]
+    def block(k, a, b):
+        if (k, a, b) not in memo:
+            memo[(k, a, b)] = _ref_block(S, order[k], a, b, params, forbidden)
+        return memo[(k, a, b)]
 
     best, arg = -math.inf, None
-    for placement in itertools.product(*[_spans(d, E) for d in order]):
-        ok = all(placement[k][0] >= placement[k - 1][1] for k in range(1, len(order)))
-        if not ok:
-            continue
+    for placement in _ref_placements(order, E, params.block_slack):
         v, prev_b = 0.0, 0
-        for k, (d, (a, b)) in enumerate(zip(order, placement, strict=True)):
-            free = d.free_gap_before or (k == 0 and d.number is not None and d.number > 1)
-            if not free:
-                v -= params.gap_penalty * (a - prev_b)
-            v += inner(k, a, b)[0]
+        for k, (a, b) in enumerate(placement):
+            v -= _ref_gap_cost(order, k, prev_b, a, params.gap_penalty)
+            v += block(k, a, b)[0]
             prev_b = b
         if v > best:
             best, arg = v, placement
@@ -79,19 +119,19 @@ def _brute(S, discs, params=P, forbidden=frozenset()):
         return -math.inf, None
     column = [-1] * F
     for k, (a, b) in enumerate(arg):
-        for f, c in zip(order[k].files, inner(k, a, b)[1], strict=True):
+        for f, c in zip(order[k].files, block(k, a, b)[1], strict=True):
             column[f] = c
     return best, column
 
 
 def _value(S, discs, sol, params=P):
     """Recompute a solution's objective from its blocks and columns (no loose files)."""
+    order = _ref_order(discs)
     v, prev_b = 0.0, 0
-    for k, d in enumerate(_disc_order(discs)):
+    for k, d in enumerate(order):
         a, b = sol.blocks[d.key]
-        free = d.free_gap_before or (k == 0 and d.number is not None and d.number > 1)
-        if not free:
-            v -= params.gap_penalty * (a - prev_b)
+        assert a >= prev_b
+        v -= _ref_gap_cost(order, k, prev_b, a, params.gap_penalty)
         cols = [sol.column[f] for f in d.files]
         assert all(c == -1 or a <= c < b for c in cols)
         u = 0.0 if d.incomplete else params.unclaimed_penalty
@@ -102,49 +142,115 @@ def _value(S, discs, sol, params=P):
 
 
 def _random_case(rng):
-    E = int(rng.integers(1, 8))
+    """A season with structure: consecutive true blocks, skipped titles (fewer files than the
+    block's episodes), extras and duplicates (more files), skipped disc numbers, unnumbered,
+    incomplete and fixed discs. One case in four is pure noise. Returns S, discs, features."""
+    E = int(rng.integers(2, 7))
     D = int(rng.integers(1, 4))
-    F = int(rng.integers(0, 7))
-    owner = rng.integers(0, D, F)
+    unnumbered = rng.random() < 0.25
     numbers = sorted(rng.choice(np.arange(1, 6), D, replace=False).tolist())
-    discs = []
+    cuts = sorted(rng.choice(np.arange(0, E + 1), D + 1, replace=True).tolist())
+    rows: list[np.ndarray] = []
+    discs, feats = [], set()
     for k in range(D):
-        files = tuple(int(i) for i in np.flatnonzero(owner == k))
+        a, b = cuts[k], cuts[k + 1]
+        files = []
+        for e in range(a, b):
+            if rng.random() < 0.3:
+                feats.add("skipped_title")
+                continue
+            if len(files) >= 3:
+                break
+            r = rng.normal(0.0, 1.5, E)
+            r[e] = rng.uniform(2.0, 5.0)
+            files.append(len(rows))
+            rows.append(r)
+            if rng.random() < 0.2 and len(files) < 3:  # a near-duplicate rip
+                files.append(len(rows))
+                rows.append(r - 0.3)
+                feats.add("duplicate")
+        while len(files) < 3 and rng.random() < 0.3:  # an extra
+            files.append(len(rows))
+            rows.append(rng.normal(-3.0, 1.0, E))
+            feats.add("extra")
+        if len(files) < b - a:
+            feats.add("fewer_files_than_episodes")
+        if len(files) > b - a:
+            feats.add("more_files_than_episodes")
+        number = None if unnumbered else numbers[k]
+        skip = k > 0 and numbers[k] > numbers[k - 1] + 1
+        incomplete = bool(rng.random() < 0.25)
+        fixed = None
+        if rng.random() < 0.2:
+            fixed = (a, b) if rng.random() < 0.7 else (int(rng.integers(0, E)), E)
+            feats.add("fixed")
+        feats |= {"unnumbered"} if unnumbered else set()
+        feats |= {"skipped_number"} if skip else set()
+        feats |= {"incomplete"} if incomplete else set()
         discs.append(
-            DiscSpec(
-                key=f"d{numbers[k]}",
-                files=files,
-                number=numbers[k],
-                incomplete=bool(k == D - 1 and rng.random() < 0.3),
-                free_gap_before=bool(k > 0 and numbers[k] > numbers[k - 1] + 1),
-            )
+            DiscSpec(f"d{k}", tuple(files), number, incomplete, fixed, free_gap_before=skip)
         )
-    rng.shuffle(discs)  # the solver sorts by number
-    S = rng.normal(0.0, 3.0, (F, E))
-    return S, discs
+    S = np.array(rows).reshape(len(rows), E)
+    if rng.random() < 0.25:
+        S = rng.normal(0.0, 3.0, S.shape)
+        feats.add("noise")
+    if not unnumbered:
+        rng.shuffle(discs)  # the solver sorts by number
+    return S, discs, feats
+
+
+SEEDS = range(80)
+
+
+def test_random_cases_cover_every_feature():
+    seen = set()
+    for seed in SEEDS:
+        seen |= _random_case(np.random.default_rng(seed))[2]
+    assert seen >= {
+        "fixed",
+        "unnumbered",
+        "incomplete",
+        "skipped_number",
+        "skipped_title",
+        "fewer_files_than_episodes",
+        "more_files_than_episodes",
+        "extra",
+        "duplicate",
+        "noise",
+    }
 
 
 # ---- (a) brute force ----------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("seed", range(60))
+@pytest.mark.parametrize("seed", SEEDS)
 def test_solve_blocks_matches_brute_force(seed):
     rng = np.random.default_rng(seed)
-    S, discs = _random_case(rng)
+    S, discs, _ = _random_case(rng)
     sol = solve_blocks(S, discs)
     best, _ = _brute(S, discs)
+    if best == -math.inf:
+        assert sol.total == -math.inf
+        return
     assert sol.total == pytest.approx(best)
     assert _value(S, discs, sol) == pytest.approx(best)
     used = [c for c in sol.column if c >= 0]
     assert len(used) == len(set(used))
-    spans = [sol.blocks[d.key] for d in _disc_order(discs)]
-    assert all(spans[k][0] >= spans[k - 1][1] for k in range(1, len(spans)))
 
 
-@pytest.mark.parametrize("seed", range(12))
+@pytest.mark.parametrize("slack", [0, 1, 3])
+def test_block_slack_is_a_parameter(slack):
+    params = BlockParams(block_slack=slack)
+    for seed in range(15):
+        S, discs, _ = _random_case(np.random.default_rng(900 + seed))
+        best, _ = _brute(S, discs, params=params)
+        assert solve_blocks(S, discs, params=params).total == pytest.approx(best)
+
+
+@pytest.mark.parametrize("seed", range(20))
 def test_forbidden_pairs_match_brute_force(seed):
     rng = np.random.default_rng(500 + seed)
-    S, discs = _random_case(rng)
+    S, discs, _ = _random_case(rng)
     F, E = S.shape
     if F == 0:
         return
@@ -154,6 +260,24 @@ def test_forbidden_pairs_match_brute_force(seed):
     assert sol.total == pytest.approx(best)
     if math.isfinite(best):
         assert not any((i, c) in forbidden for i, c in enumerate(sol.column))
+
+
+def test_skipped_title_keeps_the_last_episode_matched():
+    """Disc 1 holds episodes 1-4 but MakeMKV skipped episode 3's title: 3 files for a 4-wide
+    block. The episode-4 file must stay matched (one unclaimed position costs u)."""
+    E = 8
+    truth = {0: 0, 1: 1, 2: 3, 3: 4, 4: 5, 5: 6, 6: 7}  # row -> episode column
+    S = np.full((7, E), -2.0)
+    for r, e in truth.items():
+        S[r, e] = 4.0
+    discs = [DiscSpec("disc1", (2, 0, 1), 1), DiscSpec("disc2", (3, 4, 5, 6), 2)]
+    sol = solve_blocks(S, discs)
+    assert sol.column == [truth[r] for r in range(7)]
+    assert sol.blocks == {"disc1": (0, 4), "disc2": (4, 8)}
+    assert sol.total == pytest.approx(7 * 4.0 - P.unclaimed_penalty)
+    # without slack the ep-4 file is forced out of its block and loses its evidence
+    tight = solve_blocks(S, discs, params=BlockParams(block_slack=0))
+    assert tight.column[2] != 3 and tight.total < sol.total - 4.0
 
 
 # ---- (b) content, not counts --------------------------------------------------------------------
@@ -238,9 +362,15 @@ def test_incomplete_last_disc():
     assert sol.blocks["disc2"] == (4, 8)  # open upper boundary, unclaimed positions free
     matched = sum(S[f, c] for f, c in enumerate(truth) if c >= 0)
     assert sol.total == pytest.approx(matched)
-    # marked complete, 2 files can't span 4 positions: one of the two is given up
-    sol_c = solve_blocks(S, [discs[0], DiscSpec("disc2", discs[1].files, 2)])
-    assert sol_c.column != truth and sol_c.total < matched
+    # marked complete, 2 files span 4 positions only through a slack of 2, paying u twice
+    complete = [discs[0], DiscSpec("disc2", discs[1].files, 2)]
+    slack2 = BlockParams(unclaimed_penalty=1.0, block_slack=2)
+    sol_c = solve_blocks(S, complete, params=slack2)
+    assert sol_c.column == truth
+    assert sol_c.total == pytest.approx(matched - 2 * slack2.unclaimed_penalty)
+    # without slack, 2 files can't span 4 positions: one of the two is given up
+    sol_t = solve_blocks(S, complete, params=BlockParams(block_slack=0))
+    assert sol_t.column != truth and sol_t.total < matched
 
 
 def test_fixed_block_is_forced():
@@ -291,19 +421,69 @@ def test_infeasible_forbidden_gives_minus_inf():
     assert sol.total == -math.inf
 
 
+def test_loose_file_holding_an_episode_a_disc_takes():
+    """Sequential limitation (module docstring): disc 1's weak episode-3 file claims episode 3
+    in the DP, so the loose file that holds episode 3 strongly is left unmatched. Its
+    confidence must not call it an identified extra: the pinned alternative (loose file on
+    episode 3, disc files forbidden from it, blocks re-solved) beats the total, so Δ = 0, level
+    low, runner-up episode 3."""
+    E = 6
+    S = np.full((5, E), -3.0)
+    for r in range(4):
+        S[r, r] = 4.0
+    S[2, 2] = 1.0  # disc 1's episode-3 file is weak
+    S[4] = -6.0
+    S[4, 2] = 9.0  # the loose file holds episode 3 strongly
+    discs = [DiscSpec("disc1", (0, 1, 2, 3), 1)]
+    sol = solve_blocks(S, discs, loose=(4,))
+    assert sol.column == [0, 1, 2, 3, -1]  # sequential: the disc took episode 3
+    conf = block_confidence(S, discs, sol, loose=(4,))
+    fc = conf[4]
+    assert fc.delta == 0.0 and fc.level == "low" and fc.runner_up == 2
+    # the joint value the pinned alternative found: disc block without episode 3 for file 2
+    pinned = solve_blocks(S, discs, forbidden={(2, 2)}).total + 9.0
+    assert pinned > sol.total
+    # disc files are unaffected by the loose-file rule
+    assert conf[0].level == "high"
+
+
+def test_loose_file_confidence_is_exact_when_nothing_competes():
+    S, discs, truth = _season([list(range(0, 4))], 8, extras_per_disc=[0])
+    F = S.shape[0]
+    extra = np.full((1, 8), -5.0)
+    extra[0, 6] = 1.5  # a loose file weakly on episode 7, which no disc wants
+    S = np.vstack([S, extra])
+    sol = solve_blocks(S, discs, loose=(F,))
+    assert sol.column[F] == 6
+    fc = block_confidence(S, discs, sol, loose=(F,))[F]
+    assert fc.delta == pytest.approx(1.5) and fc.runner_up == -1  # next best: unmatched
+
+
+def test_infeasible_alternative_is_low_not_high():
+    """File 0 sits in an empty fixed block: forbidding its unmatched column is infeasible.
+    That must read as no information (Δ 0, low), never as certainty."""
+    S = np.array([[3.0, 3.0]])
+    discs = [DiscSpec("d1", (0,), 1, fixed=(0, 0))]
+    sol = solve_blocks(S, discs)
+    assert sol.column == [-1]
+    (fc,) = block_confidence(S, discs, sol)
+    assert fc.delta == 0.0 and fc.level == "low" and fc.runner_up is None
+    assert fc.runner_up_delta is None
+
+
 # ---- (g) confidence -----------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("seed", range(25))
 def test_block_confidence_matches_brute_force(seed):
     rng = np.random.default_rng(2000 + seed)
-    S, discs = _random_case(rng)
+    S, discs, _ = _random_case(rng)
     sol = solve_blocks(S, discs)
     best = sol.total
     for i, fc in enumerate(block_confidence(S, discs, sol)):
         alt, alt_cols = _brute(S, discs, forbidden=frozenset({(i, sol.column[i])}))
-        if alt == -math.inf:
-            assert fc.delta == math.inf and fc.runner_up is None and fc.level == "high"
+        if alt == -math.inf or best == -math.inf:
+            assert fc.delta == 0.0 and fc.runner_up is None and fc.level == "low"
             continue
         assert fc.delta == pytest.approx(best - alt, abs=1e-9)
         assert fc.runner_up_delta == pytest.approx(fc.delta)

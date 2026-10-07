@@ -55,8 +55,9 @@ from showvenist.bundle.schema import Bundle, lang_codes
 from showvenist.bundle.store import slugify
 from showvenist.config import Config
 from showvenist.fusion import fuse
-from showvenist.hierarchy.marker import named_episodes
+from showvenist.hierarchy.marker import _find_ordering, named_episodes
 from showvenist.hierarchy.types import DiscNode, FileNode, Marker, SeasonNode, ShowNode
+from showvenist.report import _version as report_version
 from showvenist.report import build_report, format_odds
 from showvenist.report_schema import (
     Confidence,
@@ -104,6 +105,14 @@ FLAG_NOT_READY = "not_ready"  # still being written (§5.2): not analyzed
 FLAG_NAMED = "named"  # name already parses as an episode (§5.5): ground truth, never renamed
 FLAG_OUT_OF_SCOPE = "out_of_scope"  # evidence points to another season (§11.3)
 FLAG_DISC_WINDOW_FAILED = "disc_window_failed"  # §10.2
+FLAG_UNREADABLE = "unreadable"  # could not be read or analyzed: needs review (§4.5)
+
+
+def ordering_key(bundle: Bundle, name: str) -> str | None:
+    """The bundle key of the ordering `name` refers to: a key (any case), an ordering type or a
+    Jellyfin keyword (the marker's resolver, §5.4, §5.5); None when it names none."""
+    o = _find_ordering(bundle, name)
+    return None if o is None else next(k for k, v in bundle.orderings.items() if v is o)
 
 
 def default_scorers() -> list[Scorer]:
@@ -270,7 +279,8 @@ class Session:
         self.use_blocks = use_blocks
         b = config.blocks
         self.block_params = block_params or BlockParams(
-            b.unclaimed_penalty, b.gap_penalty, b.ordering_threshold
+            b.unclaimed_penalty, b.gap_penalty, b.ordering_threshold,
+            block_slack=b.block_slack, ordering_margin=b.ordering_margin,
         )
         self.cache = cache
         if ordering not in bundle.orderings:
@@ -392,8 +402,12 @@ class Session:
         return None if self.tree is not None else disc_of(path)
 
     def _named_order(self) -> str:
-        if self.marker is not None and self.marker.naming_order in self.bundle.orderings:
-            return self.marker.naming_order
+        """Names are read in the marker's naming_order (§5.5), however it is written (key,
+        type or Jellyfin keyword), whatever --order says; without one, the starting ordering."""
+        if self.marker is not None:
+            key = ordering_key(self.bundle, self.marker.naming_order)
+            if key is not None:
+                return key
         return self.starting_ordering
 
     def analyze(
@@ -469,6 +483,11 @@ class Session:
                         ocr_quality=r.dialogue.ocr_quality if r.dialogue else None,
                     )
                 )
+        for dup, primary in list(self.duplicates.items()):
+            if primary in self.errors:  # an exact copy of an unreadable file is unreadable too
+                del self.duplicates[dup]
+                self.dup_infos.pop(dup, None)
+                self.errors[dup] = f"exact copy of {primary.name}: {self.errors[primary]}"
         self._evidence_changed(reset_llm=True)
         return list(self.files)
 
@@ -1023,8 +1042,11 @@ class Session:
     def report(self, solution: Solution | None = None) -> Report:
         """Report over every file the session saw: solved rows, duplicates (repeating their
         primary's decision, flagged `duplicate`, §14), named files (`named`), and files not
-        ready (`not_ready`, reported as low-confidence extras: not analyzed). Unreadable files
-        are not in the report (see `errors`)."""
+        ready (`not_ready`, reported as low-confidence extras: not analyzed) and unreadable
+        files (`unreadable`, low confidence with the reason in a notice: they need review).
+        With no row to solve (every file named, not ready or unreadable) nothing is solved."""
+        if solution is None and self.solution is None and not self.rows:
+            return self._unsolved_report()
         sol = solution or self.solution or self.solve()
         R = len(sol.files)
         files = list(sol.files)
@@ -1068,10 +1090,33 @@ class Session:
             season=self.season,
             flags=flags,
         )
+        return self._finish(rep, [*rep.notices, *self._notices(sol)])
+
+    def _unsolved_report(self) -> Report:
+        rep = Report(
+            tool_version=report_version(),
+            show_slug=self.show_slug,
+            bundle_revision=self.bundle.bundle_revision,
+            ordering=self.ordering,
+            season=self.season,
+            summary=Summary(files=0, high=0, medium=0, low=0, extras=0),
+        )
+        return self._finish(rep, self._notices(None))
+
+    def _finish(self, rep: Report, notices: list[str]) -> Report:
+        """Adds the rows that are not part of the solve (named side rows, not-ready and
+        unreadable files) and recounts the summary."""
         extra_rows = [self._side_row(n) for n in self.named.values() if not n.row]
         extra_rows += [
             self._plain_row(info, "extra", None, [FLAG_NOT_READY])
             for info in self.not_ready.values()
+        ]
+        extra_rows += [
+            self._plain_row(
+                FileInfo(path=path, fingerprint="", duration_s=0.0, disc=self._disc_name(path)),
+                "extra", None, [FLAG_UNREADABLE],
+            )
+            for path in self.errors
         ]
         all_rows = [*rep.files, *extra_rows]
         all_rows.sort(key=lambda r: (r.disc is None, r.disc or "", r.path))
@@ -1085,13 +1130,15 @@ class Session:
                     low=sum(r.confidence.level == "low" for r in all_rows),
                     extras=sum(r.decision.kind == "extra" for r in all_rows),
                 ),
-                "notices": [*rep.notices, *self._notices(sol)],
+                "notices": notices,
             }
         )
 
-    def _notices(self, sol: Solution) -> list[str]:
-        out = list(sol.notices)
-        for i, c in sol.out_of_scope.items():
+    def _notices(self, sol: Solution | None) -> list[str]:
+        out = [] if sol is None else list(sol.notices)
+        for path, err in self.errors.items():
+            out.append(f"{path.name}: unreadable ({err}); it needs review")
+        for i, c in ({} if sol is None else sol.out_of_scope).items():
             out.append(
                 f"{sol.files[i].path.name}: evidence points to {c.label} ({c.episode.title}), "
                 "outside this season; it was not moved there (pin it to change season)"
@@ -1149,10 +1196,12 @@ __all__ = [
     "FLAG_NO_DIALOGUE",
     "FLAG_OUT_OF_SCOPE",
     "FLAG_PINNED",
+    "FLAG_UNREADABLE",
     "Session",
     "Solution",
     "bundle_vocabulary",
     "default_scorers",
     "disc_label",
     "disc_of",
+    "ordering_key",
 ]

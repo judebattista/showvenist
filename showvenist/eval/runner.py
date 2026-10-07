@@ -68,7 +68,7 @@ from showvenist.fusion import fuse
 from showvenist.hierarchy.parse import parse_disc
 from showvenist.hierarchy.types import DiscNode, DiscRef, FileNode, SeasonNode, ShowNode
 from showvenist.scoring.types import Assignment, FileConfidence, Regime, Scorer
-from showvenist.session import Session, Solution, bundle_vocabulary
+from showvenist.session import Session, Solution, bundle_vocabulary, ordering_key
 
 # progress(done, total, path, error) over every labeled file of the run
 Progress = Callable[[int, int, Path, str | None], None]
@@ -96,6 +96,9 @@ class GroupRun:
     llm_cost_usd: float = 0.0  # new API spend (cache hits are free)
     llm_estimate_usd: float = 0.0
     llm_refused: bool = False  # `approve` said no: the group was solved without the LLM
+    # labeled files with no `Season N` folder whose hard season filter came from their label
+    # (a leak of the label into the solve; counted so eval can say so)
+    season_from_label: int = 0
 
     @property
     def key(self) -> str:
@@ -293,6 +296,7 @@ def run_eval(
     approve: Approve | None = None,
     use_blocks: bool = True,
     tag_of: Callable[[Path], str | None] | None = None,
+    starting_order: str | None = None,
 ) -> tuple[list[FileDecision], EvalResult]:
     """Analyze, score and solve every labeled file, then compute the §16.1 metrics.
 
@@ -300,8 +304,14 @@ def run_eval(
     (§11.3); only a path without one falls back to the episode label's season. A folder and
     label that disagree are reported as a Problem (the file is kept, in the folder's season).
     Files with no season form a whole-show group only when the show has no seasoned group;
-    otherwise they're Problems. Each group is solved in the ordering most of its rows name.
-    History prior is off. `scorers` replaces the default scorer set.
+    otherwise they're Problems. History prior is off. `scorers` replaces the default scorer set.
+
+    Starting ordering (§11.6): `starting_order` names the ordering every group starts from
+    (any name `identify --order` takes; eval's CLI passes 'aired'), so ordering detection has
+    to find the release order itself, as in production. None (or "labels") starts from the
+    ordering most of the group's labels are written in, which hands detection the answer
+    (decision 47's measurements did this). A name a show's bundle lacks makes its groups
+    Problems.
 
     LLM (§10.2): with `llm_mode` "auto" or "all", `llm_factory()` builds an LlmScorer per group;
     after the first solve its `send` set is chosen, its cost estimated, and it runs only if
@@ -340,10 +350,15 @@ def run_eval(
         orders = Counter(lab.row.order for lab in labs if lab.kind == "episode") or Counter(
             lab.row.order for lab in labs
         )
-        order = _ordering_key(bundle, orders.most_common(1)[0][0])
+        if starting_order is None or starting_order == "labels":
+            want = orders.most_common(1)[0][0]
+            order = _ordering_key(bundle, want)
+        else:
+            want = starting_order
+            order = ordering_key(bundle, want)
         try:
             if order is None:
-                raise ValueError(f"unknown ordering {orders.most_common(1)[0][0]!r}")
+                raise ValueError(f"unknown ordering {want!r}")
             if show not in vocab:
                 vocab[show] = bundle_vocabulary(bundle, bdir)
             tree = group_tree(labs, season, read_tag, config.hierarchy)
@@ -379,7 +394,10 @@ def run_eval(
         t2 = time.perf_counter()
         solution = session.solve()
         run = GroupRun(show, season, order, session, solution, labs,
-                       first_levels=[c.level for c in solution.confidences])
+                       first_levels=[c.level for c in solution.confidences],
+                       season_from_label=sum(
+                           season is not None and path_season(lab.row.path) is None
+                           for lab in labs))
         if llm_mode != "off" and llm_factory is not None:
             llm = llm_factory()
             llm.send = set(session.llm_targets(llm_mode))
