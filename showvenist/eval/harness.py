@@ -65,6 +65,34 @@ def _resolve_episode(row: ManifestRow, bundle: Bundle) -> tuple[str | None, int 
     return eid, season, ""
 
 
+def _split_multi(label: str) -> list[str] | None:
+    """'S01E01+S01E02' or 'S01E01+E02' -> ['S01E01', 'S01E02']; None for a single label."""
+    parts = [x.strip() for x in label.split("+")]
+    if len(parts) < 2:
+        return None
+    m = re.match(r"^(s\d{1,3})e\d{1,4}$", parts[0], re.IGNORECASE)
+    out = [parts[0]]
+    for x in parts[1:]:
+        out.append(f"{m.group(1)}{x}" if m and re.match(r"^e\d{1,4}$", x, re.IGNORECASE) else x)
+    return out
+
+
+def _resolve_multi(row: ManifestRow, bundle: Bundle, parts: list[str]):
+    ids: list[str] = []
+    season: int | None = None
+    for part in parts:
+        eid, s, reason = _resolve_episode(
+            ManifestRow(row.path, row.show, part, row.order, row.disc), bundle
+        )
+        if reason:
+            return None, None, reason
+        ids.append(eid)
+        season = season if season is not None else s
+    if len(set(ids)) != len(ids):
+        return None, None, f"{row.label} names the same episode twice"
+    return tuple(ids), season, ""
+
+
 def resolve_labels(
     rows: Iterable[ManifestRow], bundles: Mapping[str, Bundle]
 ) -> tuple[list[ResolvedLabel], list[Problem]]:
@@ -87,6 +115,12 @@ def resolve_labels(
             resolved.append(ResolvedLabel(row, "extra", multi=True))
         elif label == "episode?":
             resolved.append(ResolvedLabel(row, "episode?"))
+        elif (parts := _split_multi(row.label.strip())) is not None:
+            ids, _, reason = _resolve_multi(row, bundle, parts)
+            if reason:
+                problems.append(Problem(row, reason))
+            else:
+                resolved.append(ResolvedLabel(row, "episode", episode_id=ids[0], episode_ids=ids))
         else:
             eid, _, reason = _resolve_episode(row, bundle)
             if reason:
@@ -96,11 +130,11 @@ def resolve_labels(
 
     counts: dict[tuple[str, str], int] = defaultdict(int)
     for r in resolved:
-        if r.kind == "episode":
+        if r.kind == "episode" and not r.episode_ids:
             counts[(r.row.show, r.episode_id)] += 1
     out = [
         ResolvedLabel(r.row, r.kind, r.episode_id, duplicate_set=r.episode_id)
-        if r.kind == "episode" and counts[(r.row.show, r.episode_id)] > 1
+        if r.kind == "episode" and not r.episode_ids and counts[(r.row.show, r.episode_id)] > 1
         else r
         for r in resolved
     ]
@@ -137,6 +171,8 @@ def _is_correct(label: ResolvedLabel, d: FileDecision) -> bool:
         # flagged as its duplicates.
         if d.duplicate:
             return d.episode_id in (None, label.episode_id)
+    if label.episode_ids:
+        return d.kind == "episode" and d.episode_id in label.episode_ids
     return d.kind == "episode" and d.episode_id == label.episode_id
 
 
@@ -210,11 +246,16 @@ def _path_season(path: str) -> int | None:
 def _season(label: ResolvedLabel, bundles: Mapping[str, Bundle] | None) -> int | None:
     """Season of an episode label from its ordering entry; else from a `Season N` folder."""
     if label.kind == "episode" and bundles and label.row.show in bundles:
-        _, season, reason = _resolve_episode(label.row, bundles[label.row.show])
+        first = (_split_multi(label.row.label.strip()) or [label.row.label.strip()])[0]
+        _, season, reason = _resolve_episode(
+            ManifestRow(label.row.path, label.row.show, first, label.row.order, label.row.disc),
+            bundles[label.row.show],
+        )
         if not reason:
             return season
     if label.kind == "episode":
-        m = _EPISODE_RE.match(label.row.label.strip())
+        first = (_split_multi(label.row.label.strip()) or [label.row.label.strip()])[0]
+        m = _EPISODE_RE.match(first)
         if m:
             return int(m.group(1))
     return _path_season(label.row.path)
@@ -238,7 +279,7 @@ def compute_metrics(
     held: dict[str, set[str]] = defaultdict(set)
     for lab in labels:
         if lab.kind == "episode" and lab.episode_id is not None:
-            held[lab.row.show].add(lab.episode_id)
+            held[lab.row.show].update(lab.episode_ids or (lab.episode_id,))
 
     problems: list[Problem] = []
     scored: list[_Scored] = []

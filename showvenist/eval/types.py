@@ -26,6 +26,8 @@ class ResolvedLabel:
     episode_id: str | None = None  # set for kind == "episode"
     duplicate_set: str | None = None  # files sharing a label (§14); kept out of precision
     multi: bool = False  # `extra-multi`: several episodes on one track; an extra for scoring
+    # a two-part episode muxed as one file, labeled "S01E01+S01E02": correct if either is chosen
+    episode_ids: tuple[str, ...] = ()
 
 
 @dataclass

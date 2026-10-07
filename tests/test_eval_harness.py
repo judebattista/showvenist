@@ -260,3 +260,29 @@ def test_extra_multi_is_scored_as_an_extra_and_reported_separately():
     assert m.extra_multi_files == 2 and m.extra_multi_as_extra == 1
     assert m.extra_multi_as_episode_high == 1  # a play-all taken for an episode at high
     assert m.precision_high.errors == 1  # and that is an error at high like any extra missed
+
+
+def test_two_part_label_is_correct_for_either_episode_and_holds_both_slots():
+    from showvenist.eval.harness import compute_metrics, resolve_labels
+    from showvenist.eval.types import ManifestRow
+    from tests.synth import make_bundle
+
+    b = make_bundle(4)  # episodes tmdb:100..103 as S01E01..S01E04
+    rows = [ManifestRow("/two", "synth-show-2000", "S01E01+S01E02"),
+            ManifestRow("/two_short", "synth-show-2000", "S01E01+E02"),
+            ManifestRow("/q", "synth-show-2000", "episode?"),
+            ManifestRow("/bad", "synth-show-2000", "S01E01+S01E09")]
+    labels, problems = resolve_labels(rows, {"synth-show-2000": b})
+    assert len(problems) == 1 and "S01E09" in problems[0].reason
+    two = labels[0]
+    assert two.kind == "episode" and two.episode_ids == ("tmdb:100", "tmdb:101")
+    assert labels[1].episode_ids == two.episode_ids
+    for chosen in ("tmdb:100", "tmdb:101"):
+        m = compute_metrics([two], [ep("/two", chosen)]).overall
+        assert m.top1 == 1.0 and m.precision_high.errors == 0
+    m = compute_metrics([two], [ep("/two", "tmdb:102")]).overall
+    assert m.top1 == 0.0 and m.precision_high.errors == 1
+    # an episode? file decided at high for a slot the two-part file holds is a provable error
+    q = labels[2]
+    m = compute_metrics([two, q], [ep("/two", "tmdb:100"), ep("/q", "tmdb:101")]).overall
+    assert m.episode_unknown_provable_errors == 1

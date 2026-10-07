@@ -93,6 +93,8 @@ def eval_caveats(groups: Sequence[GroupRun], blocks: bool = True) -> list[str]:
 def _item(r: EvidenceRow, season_key: str, regime: str, names: Iterable[str]) -> FitItem | None:
     llr = {k: r.llr[k] for k in names if k in r.llr and r.available.get(k, False)}
     common = dict(season_key=season_key, regime=regime, llr=llr, n_candidates=len(r.candidates))
+    if r.label_kind == "episode" and r.target_set:
+        return FitItem(target="any_episode", target_set=tuple(r.target_set), **common)
     if r.label_kind == "episode" and r.target is not None and r.target >= 0:
         return FitItem(target="episode", target_index=r.target, **common)
     if r.label_kind == "extra":

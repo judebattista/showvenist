@@ -224,7 +224,9 @@ def evidence_table(
     by_path = {lab.row.path: lab for lab in labels}
     by_resolved = {str(Path(lab.row.path)): lab for lab in labels}
     col_of = {c.id: c.index for c in solution.candidates}
-    held = {lab.episode_id for lab in labels if lab.kind == "episode"}
+    held = {
+        i for lab in labels if lab.kind == "episode" for i in (lab.episode_ids or (lab.episode_id,))
+    }
     out: list[EvidenceRow] = []
     for i, f in enumerate(solution.files):
         lab = by_path.get(str(f.path)) or by_resolved.get(str(f.path))
@@ -235,6 +237,8 @@ def evidence_table(
             target = -1
         elif lab is not None and lab.kind == "episode":
             target = col_of.get(lab.episode_id or "")
+            if lab.episode_ids:  # a two-part file: a set label over its episodes
+                tset = [col_of[i] for i in lab.episode_ids if i in col_of]
         elif lab is not None and lab.kind == "episode?":
             tset = [c.index for c in solution.candidates if c.id not in held]
         out.append(

@@ -151,11 +151,8 @@ def sheet_to_rows(sheet_csv: Path) -> list[tuple[str, str, str, str, str]]:
         if not label:
             continue
 
-        # Normalize label case if it's an episode label
-        if re.match(r"[sS]\d{1,2}[eE]\d{1,3}", label):
-            m = re.match(r"[sS](\d{1,2})[eE](\d{1,3})", label)
-            if m:
-                label = _normalize_label(int(m.group(1)), int(m.group(2)))
+        # Normalize label case if it's an episode label (or a two-part 'S01E01+S01E02' label)
+        label = "+".join(_normalize_part(part) for part in label.split("+"))
 
         # Extract show (from first path component)
         path = row.get("path", "") or ""
@@ -171,6 +168,19 @@ def sheet_to_rows(sheet_csv: Path) -> list[tuple[str, str, str, str, str]]:
         result.append((path, show, label, order, disc))
 
     return result
+
+
+def _normalize_part(part: str) -> str:
+    """'s01e02' -> 'S01E02'; 'e02' -> 'E02' (the season of a two-part label's later parts is
+    inherited by the harness); anything else (extra, extra-multi, episode?) is lower-cased."""
+    part = part.strip()
+    m = re.fullmatch(r"[sS](\d{1,2})[eE](\d{1,3})", part)
+    if m:
+        return _normalize_label(int(m.group(1)), int(m.group(2)))
+    m = re.fullmatch(r"[eE](\d{1,3})", part)
+    if m:
+        return f"E{int(m.group(1)):02d}"
+    return part.lower() if part.lower() in ("extra", "extra-multi", "episode?") else part
 
 
 def merge_sample_labels(sample_csv: Path, full_csv: Path, dest: Path) -> int:

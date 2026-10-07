@@ -312,3 +312,19 @@ def test_bundle_slugs_and_sample_merge(tmp_path):
     from showvenist.eval.mkmanifest import sheet_to_rows
 
     assert [r[2] for r in sheet_to_rows(out)] == ["extra", "extra"]  # the duplicate inherits
+
+
+def test_sheet_labels_are_normalized_including_two_part_and_extra_multi(tmp_path):
+    from showvenist.eval.mkmanifest import sheet_to_rows
+
+    sheet = tmp_path / "s.csv"
+    sheet.write_text(
+        "path,show,label,same_as\n"
+        "A/a_t00.mkv,A,s01e01+s01e02,\n"
+        "A/a_t01.mkv,A,S02E05+e06,\n"
+        "A/a_t02.mkv,A,Extra-Multi,\n"
+        "A/a_t03.mkv,A,s03e04,\n"
+        "A/a_t04.mkv,A,EXTRA,\n"
+    )
+    assert [r[2] for r in sheet_to_rows(sheet)] == [
+        "S01E01+S01E02", "S02E05+E06", "extra-multi", "S03E04", "extra"]
