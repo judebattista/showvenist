@@ -83,6 +83,8 @@ def resolve_labels(
         label = row.label.strip().lower()
         if label == "extra":
             resolved.append(ResolvedLabel(row, "extra"))
+        elif label in ("extra-multi", "extra_multi", "extramulti"):
+            resolved.append(ResolvedLabel(row, "extra", multi=True))
         elif label == "episode?":
             resolved.append(ResolvedLabel(row, "episode?"))
         else:
@@ -182,6 +184,12 @@ def _metric_set(items: list[_Scored]) -> MetricSet:
         ms.unmatched_precision = tp / len(predicted) if predicted else None
         ms.unmatched_recall = tp / len(actual) if actual else None
 
+    multi = [s for s in items if s.label.multi]
+    ms.extra_multi_files = len(multi)
+    ms.extra_multi_as_extra = sum(s.decision.kind == "extra" for s in multi)
+    ms.extra_multi_as_episode_high = sum(
+        s.high and s.decision.kind == "episode" for s in multi
+    )
     ms.episode_unknown_files = len(unknown)
     ms.episode_unknown_high_as_episode = sum(
         s.high and s.decision.kind == "episode" for s in unknown

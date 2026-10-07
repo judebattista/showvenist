@@ -50,6 +50,13 @@ def format_eval(result: EvalResult) -> str:
             f"{o.episode_unknown_high_as_episode}, flagged for review: "
             f"{o.episode_unknown_flagged}, provable errors: {o.episode_unknown_provable_errors}",
         ]
+    if o.extra_multi_files:
+        lines += [
+            "",
+            f"extra-multi files (several episodes on one track): {o.extra_multi_files}, "
+            f"decided extra: {o.extra_multi_as_extra}, taken for an episode at high confidence: "
+            f"{o.extra_multi_as_episode_high}",
+        ]
     if o.reliability:
         lines += ["", "reliability (correct share): " + ", ".join(
             f"{k} {100 * v:.1f}%" for k, v in o.reliability.items())]

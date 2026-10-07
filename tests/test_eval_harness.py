@@ -233,3 +233,30 @@ def test_evaluate_merges_problems():
     b = firefly_like()
     r = evaluate([row("/1", "S01E09"), row("/2", "extra")], {SHOW: b}, [])
     assert [p.reason.split()[0] for p in r.problems] == ["S01E09", "no"]
+
+
+def test_extra_multi_label_parses_as_an_extra_with_the_multi_flag():
+    from showvenist.eval.harness import resolve_labels
+    from showvenist.eval.types import ManifestRow
+    from tests.synth import make_bundle
+
+    rows = [ManifestRow("/a", "synth-show-2000", "extra-multi"),
+            ManifestRow("/b", "synth-show-2000", "Extra-Multi"),
+            ManifestRow("/c", "synth-show-2000", "extra")]
+    labels, problems = resolve_labels(rows, {"synth-show-2000": make_bundle()})
+    assert not problems
+    assert [(x.kind, x.multi) for x in labels] == [
+        ("extra", True), ("extra", True), ("extra", False)]
+
+
+def test_extra_multi_is_scored_as_an_extra_and_reported_separately():
+    from showvenist.eval.harness import compute_metrics
+
+    def multi(path):
+        return ResolvedLabel(row(path, "extra-multi"), "extra", multi=True)
+
+    labels = [multi("/m1"), multi("/m2"), lab("/e1", "extra")]
+    m = compute_metrics(labels, [ex("/m1"), ep("/m2", "tmdb:100"), ex("/e1")]).overall
+    assert m.extra_multi_files == 2 and m.extra_multi_as_extra == 1
+    assert m.extra_multi_as_episode_high == 1  # a play-all taken for an episode at high
+    assert m.precision_high.errors == 1  # and that is an error at high like any extra missed

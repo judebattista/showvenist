@@ -25,6 +25,7 @@ class ResolvedLabel:
     kind: LabelKind
     episode_id: str | None = None  # set for kind == "episode"
     duplicate_set: str | None = None  # files sharing a label (§14); kept out of precision
+    multi: bool = False  # `extra-multi`: several episodes on one track; an extra for scoring
 
 
 @dataclass
@@ -54,6 +55,10 @@ class MetricSet:
     episode_unknown_high_as_episode: int = 0
     episode_unknown_flagged: int = 0
     episode_unknown_provable_errors: int = 0
+    # `extra-multi` files (several episodes on one track): scored as extras, reported separately
+    extra_multi_files: int = 0
+    extra_multi_as_extra: int = 0
+    extra_multi_as_episode_high: int = 0  # the error that matters: a play-all taken for an episode
     cost_usd: float = 0.0
 
 
