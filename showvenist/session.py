@@ -3,7 +3,7 @@
     s = Session(bundle, bundle_dir, config, ordering="aired", season=1, cache=cache,
                 tree=tree)        # tree: the parsed Show/Season/Disc hierarchy (§5), optional
     s.analyze(paths)          # stage 1 + 2, concurrent and cached (§8.5); skips not-ready and
-                              # already-named files; exact duplicates set aside (§14)
+                              # already-named files; exact and near duplicates set aside (§14)
     s.score()                 # raw evidence per scorer, in the matching order
     sol = s.solve()           # fusion + disc block DP / ordering detection or basic + confidence
     rep = s.report()          # report_schema.Report
@@ -43,6 +43,14 @@ from pathlib import Path
 
 import numpy as np
 
+from showvenist.analysis.duplicates import (
+    Quality,
+    Shingles,
+    choose_primary,
+    find_near_duplicates,
+    overlap,
+    shingle_set,
+)
 from showvenist.analysis.pipeline import analyze_files
 from showvenist.analysis.subtitles import normalize
 from showvenist.analysis.types import AnalysisCache
@@ -99,6 +107,8 @@ _DISC_RE = re.compile(r"(^|[\s._-])(disc|disk|d)[\s._-]*\d+$", re.IGNORECASE)
 _LABEL_RE = re.compile(r"^s(\d{1,3})e(\d{1,4})$", re.IGNORECASE)
 
 FLAG_DUPLICATE = "duplicate"
+FLAG_NEAR_DUPLICATE = "near_duplicate"  # same dialogue, different bytes (§14); with `duplicate`
+FLAG_DUPLICATE_ALLOWED = "duplicate_allowed"  # a near duplicate kept as another version
 FLAG_NO_DIALOGUE = "no_dialogue"  # no usable subtitle track: dialogue scorers not available
 FLAG_PINNED = "pinned"
 FLAG_NOT_READY = "not_ready"  # still being written (§5.2): not analyzed
@@ -258,8 +268,10 @@ class Session:
         use_blocks: bool = True,
         block_params: BlockParams | None = None,
         marker: Marker | None = None,
+        allow_duplicates: bool = False,
     ):
         self.bundle = bundle
+        self.allow_duplicates = allow_duplicates  # near duplicates are other versions (§4.3)
         self.bundle_dir = Path(bundle_dir) if bundle_dir is not None else None
         self.config = config
         self.tree = tree
@@ -304,8 +316,15 @@ class Session:
         self.language = bundle.show.language
         self._vocab = vocabulary
         self.files: list[FileInfo] = []  # primary analyzed files: the rows the scorers see
-        self.duplicates: dict[Path, Path] = {}  # duplicate path -> primary path (§14)
+        # duplicate path -> the primary row it mirrors (§14): exact and near duplicates, always
+        # mapped straight to a row of the solve (an exact copy of a near duplicate included)
+        self.duplicates: dict[Path, Path] = {}
         self.dup_infos: dict[Path, FileInfo] = {}
+        self.near: dict[Path, tuple[Path, float]] = {}  # near duplicate -> (primary, overlap)
+        self._exact: dict[Path, Path] = {}  # exact copy -> the file with its content key
+        self._analyzed: list[FileInfo] = []  # every analyzed primary, near duplicates included
+        self._quality: dict[Path, Quality] = {}
+        self._shingles: dict[Path, Shingles] = {}
         self.errors: dict[Path, str] = {}  # unreadable files: path -> reason
         self.not_ready: dict[Path, FileInfo] = {}  # skipped, still being written (§5.2)
         self.named: dict[Path, _Named] = {}  # already named files (§5.5), in input order
@@ -416,8 +435,9 @@ class Session:
         """Stage 1 + 2 for each path, concurrent and cached (§8.5). With a tree, `paths` may
         be None (every file of the season). Not-ready files (FileNode.ready False) and files
         whose names parse as an episode are not analyzed. Exact duplicates (same content key,
-        §7.1) are recorded against the first copy. Unreadable files land in `errors` and are
-        skipped. Returns the primary analyzed files."""
+        §7.1) are recorded against the first copy; near duplicates (same dialogue, different
+        bytes) against the best copy (see `_find_near`). Unreadable files land in `errors` and
+        are skipped. Returns the primary analyzed files."""
         if paths is None:
             paths = list(self._node) if self.tree is not None else []
         paths = [Path(p) for p in paths]
@@ -462,7 +482,7 @@ class Session:
             if r.error is not None:
                 self.errors[r.path] = r.error
             elif r.duplicate_of is not None and r.duplicate_of != r.path:
-                self.duplicates[r.path] = r.duplicate_of
+                self._exact[r.path] = r.duplicate_of
                 self.dup_infos[r.path] = FileInfo(
                     path=r.path,
                     fingerprint=r.fingerprint or "",
@@ -472,7 +492,11 @@ class Session:
             elif r.duplicate_of is None and r.probe is not None:
                 assert r.content_key is not None and r.fingerprint is not None
                 self._keys[r.content_key] = r.path
-                self.files.append(
+                lines = sum(w.lines for w in r.dialogue.windows) if r.dialogue else 0
+                self._quality[r.path] = Quality(
+                    lines, r.dialogue.ocr_quality if r.dialogue else None, r.probe.size
+                )
+                self._analyzed.append(
                     FileInfo(
                         path=r.path,
                         fingerprint=r.fingerprint,
@@ -483,13 +507,46 @@ class Session:
                         ocr_quality=r.dialogue.ocr_quality if r.dialogue else None,
                     )
                 )
-        for dup, primary in list(self.duplicates.items()):
+        for dup, primary in list(self._exact.items()):
             if primary in self.errors:  # an exact copy of an unreadable file is unreadable too
-                del self.duplicates[dup]
+                del self._exact[dup]
                 self.dup_infos.pop(dup, None)
                 self.errors[dup] = f"exact copy of {primary.name}: {self.errors[primary]}"
+        self._find_near()
         self._evidence_changed(reset_llm=True)
         return list(self.files)
+
+    def _find_near(self) -> None:
+        """Near duplicates (§14) among the analyzed files of this session (one season; named
+        files and exact copies are never compared): groups by dialogue overlap
+        (`analysis.duplicates`), each collapsed into its best copy, which stays the row. A
+        pinned file is never collapsed: a group holding pinned files follows the best of them.
+        Recomputed over every analyzed file on each call (shingles cached), so analyzing again
+        is idempotent and a better copy analyzed later becomes the primary."""
+        cfg = self.config.analysis
+        sh: dict[Path, Shingles] = {}
+        for f in self._analyzed:
+            if f.path not in self._shingles:
+                self._shingles[f.path] = shingle_set(f.dialogue)
+            sh[f.path] = self._shingles[f.path]
+        near: dict[Path, tuple[Path, float]] = {}
+        for group in find_near_duplicates(sh, cfg.duplicate_overlap, cfg.duplicate_min_shingles):
+            pinned = [p for p in group if p in self.pins]
+            primary = choose_primary(pinned or group, self._quality)
+            for p in group:
+                if p != primary and p not in self.pins:
+                    near[p] = (primary, overlap(sh[p], sh[primary]))
+        for p in self.near.keys() - near.keys():
+            if p not in self._exact:
+                self.dup_infos.pop(p, None)
+        self.near = near
+        self.files = [f for f in self._analyzed if f.path not in near]
+        for f in self._analyzed:
+            if f.path in near:
+                self.dup_infos[f.path] = f  # its own duration and dialogue, for the report
+        self.duplicates = {
+            d: near[p][0] if p in near else p for d, p in self._exact.items()
+        } | {p: q for p, (q, _) in near.items()}
 
     def _add_named(self, nodes: list[FileNode]) -> None:
         rep = named_episodes(nodes, self.bundle, self._named_order())
@@ -1052,13 +1109,21 @@ class Session:
         files = list(sol.files)
         rows = list(range(R))
         flags = {i: self.flags(i) for i in range(R)}
+        own: set[int] = set()  # near duplicates: their own duration and dialogue
         for dup, primary in self.duplicates.items():
             i = self._index(primary)
-            flags[len(files)] = [FLAG_DUPLICATE, *(fl for fl in flags[i] if fl != FLAG_PINNED)]
+            flags[len(files)] = [
+                *self._dup_flags(dup), *(fl for fl in flags[i] if fl != FLAG_PINNED)
+            ]
+            if dup in self.near:
+                own.add(len(files))
             files.append(self.dup_infos[dup])
             rows.append(i)
-        # duplicates keep their own path/fingerprint/disc, but duration comes from the primary
+        # exact duplicates keep their own path/fingerprint/disc, but duration comes from the
+        # primary (they weren't probed)
         for k in range(R, len(files)):
+            if k in own:
+                continue
             p = sol.files[rows[k]]
             files[k] = FileInfo(
                 path=files[k].path,
@@ -1091,6 +1156,36 @@ class Session:
             flags=flags,
         )
         return self._finish(rep, [*rep.notices, *self._notices(sol)])
+
+    def _dup_flags(self, dup: Path) -> list[str]:
+        """`duplicate` for an exact copy; a near duplicate adds `near_duplicate`, and with
+        --allow-duplicates its `duplicate` becomes `duplicate_allowed` (another version, §4.3).
+        An exact copy of a near duplicate is a plain duplicate of that version."""
+        if dup in self.near:
+            first = FLAG_DUPLICATE_ALLOWED if self.allow_duplicates else FLAG_DUPLICATE
+            return [first, FLAG_NEAR_DUPLICATE]
+        if self._exact.get(dup) in self.near:
+            return [FLAG_DUPLICATE, FLAG_NEAR_DUPLICATE]
+        return [FLAG_DUPLICATE]
+
+    def _near_notices(self, sol: Solution | None) -> list[str]:
+        out = []
+        for dup, (primary, ov) in self.near.items():
+            head = (f"{dup.name} looks like a copy of {primary.name} "
+                    f"(dialogue overlap {round(100 * ov)}%)")
+            what = "the same extra"
+            if sol is not None:
+                col = sol.assignment.column[self._index(primary)]
+                if col >= 0:
+                    what = sol.candidates[col].label
+            if self.allow_duplicates:
+                out.append(f"{head}: kept as another version of {what} (--allow-duplicates)")
+            else:
+                out.append(
+                    f"{head}: a duplicate of {what} to review; it will not be moved to an "
+                    "episode name (keep it with --allow-duplicates, or delete it)"
+                )
+        return out
 
     def _unsolved_report(self) -> Report:
         rep = Report(
@@ -1143,6 +1238,7 @@ class Session:
                 f"{sol.files[i].path.name}: evidence points to {c.label} ({c.episode.title}), "
                 "outside this season; it was not moved there (pin it to change season)"
             )
+        out += self._near_notices(sol)
         waiting: dict[str, int] = {}
         for info in self.not_ready.values():
             key = info.disc or "(no disc)"
@@ -1191,7 +1287,9 @@ class Session:
 __all__ = [
     "FLAG_DISC_WINDOW_FAILED",
     "FLAG_DUPLICATE",
+    "FLAG_DUPLICATE_ALLOWED",
     "FLAG_NAMED",
+    "FLAG_NEAR_DUPLICATE",
     "FLAG_NOT_READY",
     "FLAG_NO_DIALOGUE",
     "FLAG_OUT_OF_SCOPE",

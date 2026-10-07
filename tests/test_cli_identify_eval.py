@@ -338,3 +338,26 @@ def test_eval_compare_blocks_and_no_blocks(tmp_path, monkeypatch, no_real_llm):
     assert "all signals" in out
     assert runner.invoke(cli.app, [*base, "--no-blocks"]).exit_code == 0
     assert runner.invoke(cli.app, [*base, "--no-blocks", "--compare-blocks"]).exit_code == 1
+
+
+@pytest.mark.parametrize("allow", [False, True])
+def test_identify_near_duplicate_and_allow_duplicates(tmp_path, monkeypatch, allow):
+    from tests.test_duplicates import lossy_copy
+
+    root, rips = setup(tmp_path, monkeypatch)
+    age(lossy_copy(dialogue_for(1), rips / "t03.mkv", 11))  # t02's episode, other bytes
+    args = ["identify", str(rips), "--show", "synth-show-2000", "-o", str(root), "--json"]
+    r = runner.invoke(cli.app, args + (["--allow-duplicates"] if allow else []))
+    assert r.exit_code in (0, 2), r.output
+    report = json.loads(r.stdout[r.stdout.index("{"):])
+    rows = {f["path"].rsplit("/", 1)[-1]: f for f in report["files"]}
+    near = rows["t03.mkv"]
+    assert near["decision"]["episode"]["episode"] == 2 and "near_duplicate" in near["flags"]
+    assert ("duplicate_allowed" in near["flags"]) is allow
+    assert ("duplicate" in near["flags"]) is not allow
+    note = next(n for n in report["notices"] if n.startswith("t03.mkv looks like a copy of"))
+    if allow:
+        assert note.endswith("kept as another version of S01E02 (--allow-duplicates)")
+    else:
+        assert "will not be moved to an episode name" in note
+    assert not any("not implemented" in n for n in report["notices"])

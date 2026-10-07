@@ -34,6 +34,8 @@ class AnalysisConfig(_Section):
     window_min_lines: int = 60
     window_max_minutes: int = 5
     readiness_stable_seconds: int = 60
+    duplicate_overlap: float = 0.5  # near-duplicate rips: dialogue containment to group (§14)
+    duplicate_min_shingles: int = 100  # files with less sampled dialogue are never grouped
 
 
 class LlmConfig(_Section):

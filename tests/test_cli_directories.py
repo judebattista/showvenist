@@ -251,7 +251,9 @@ def test_explicit_files_and_allow_duplicates(env, sessions):
     assert r.exit_code in (0, 2), r.output
     rep = report_of(r)
     assert rep["season"] == 1 and {f["disc"] for f in rep["files"]} == {"Disc 2"}
-    assert any("near-duplicate detection is not implemented" in n for n in rep["notices"])
+    # detection is implemented now: with the flag and nothing found, the notice says so
+    assert any("no near duplicates" in n for n in rep["notices"])
+    assert not any("not implemented" in n for n in rep["notices"])
 
 
 # ---- review fixes: unreadable files, marker, duplicate / side-lettered discs, notices --------

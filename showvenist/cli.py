@@ -543,8 +543,8 @@ def identify(
     include_specials: bool = typer.Option(False, "--include-specials"),
     allow_duplicates: bool = typer.Option(
         False, "--allow-duplicates",
-        help="Relax at-most-once for duplicate rips. Exact duplicates are already detected; "
-        "near duplicates are not yet (the flag only prints a notice)",
+        help="Keep near-duplicate rips (same dialogue, different bytes) as other versions of "
+        "their episode instead of duplicates to review. Exact copies stay duplicates",
     ),
     signals: str | None = typer.Option(
         None, "--signals",
@@ -689,6 +689,7 @@ def identify(
                 bundle, bundle_path(slug, root), cfg, ordering=order, season=num,
                 episodes=wanted, include_specials=include_specials or num == 0, cache=cache,
                 scorers=_scorers(sig), tree=sub, use_blocks=not no_blocks, marker=marker,
+                allow_duplicates=allow_duplicates,
             )
         except (ValueError, KeyError) as e:
             _fail(f"identify: {e}")
@@ -723,10 +724,10 @@ def identify(
                 "review. Add reference subtitles with `showvenist ingest --subs DIR`, or use "
                 "`--llm auto --yes` (the estimated cost is printed first)."
             )
-        if allow_duplicates:
+        if allow_duplicates and not sess.near:
             report.notices.append(
-                "--allow-duplicates: near-duplicate detection is not implemented yet; exact "
-                "duplicates are already reported against their first copy."
+                "--allow-duplicates: no near duplicates (same dialogue, different bytes) found; "
+                "exact copies are reported as duplicates of their first copy either way."
             )
         if folder_hint is not None:
             report.notices.append(
