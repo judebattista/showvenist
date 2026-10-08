@@ -190,7 +190,7 @@ showvenist identify PATHS... [--show NAME | --ref DIR] [--season N]
 - `history [--show NAME] [--season N]`: per season, which episodes are confirmed (with file paths), which are missing, and which files are confirmed extras.
 - `forget FILE|FINGERPRINT`: removes all records for that file (asks for confirmation).
 - `undo [--last | RUN_ID]`: reverses a run's moves, after showing them and asking for confirmation (§13.5).
-- `inspect FILE`: probe data, readiness, chosen subtitle track, OCR'd dialogue per window, cache status.
+- `inspect FILE`: probe data, readiness, chosen subtitle track, OCR'd dialogue per window, cache status. `--card` prints the OCR'd text of every sampled frame in the show's `title_card` windows (§6.6).
 - `eval (MANIFEST.csv | --from-history) [--show NAME] [--fit] [--llm …]`: see §16. `--show` limits a multi-show manifest to one show.
 
 ### 4.5 Exit codes
@@ -468,6 +468,23 @@ orderings:
 - An ordering is a list of entries, or `{base, entries}`: it starts from `base` and the seasons named in `entries` replace the base's seasons.
 
 - Validated on load with pydantic. Errors name the file and line.
+
+A show whose episodes carry an on-screen title card describes it in `title_card` (§8.4, decision 54):
+
+```yaml
+# Samurai Jack: "EPISODE XXVII" in white on black, 30-45 s before the end of every episode
+title_card:
+  windows:                  # one or more; each is searched
+    - { from: end, skip_seconds: 0, length_seconds: 180 }   # end | start; skip = distance from that edge
+  pattern: 'EPISODE\s+(?P<ref>[IVXLC]+)'   # regex; the named group `ref` is what gets matched
+  kind: roman               # roman | number | title
+  background: dark          # dark | any: prefilter to mostly-black frames (cheap) or OCR every sampled frame
+```
+
+- `windows` handle cards that are not near the credits: `from: start` with a `skip_seconds` large enough to clear the cold open and the intro finds a card shown after them.
+- `kind` sets the match (§9.2): `roman` and `number` normalize look-alike characters and compare exactly against the candidates' titles or numbers as a closed set; `title` uses the title scorer's fuzzy ratio.
+- Absent `title_card`, no card is ever read. The tool does not guess that a show has cards.
+- `inspect FILE --card` prints the OCR'd text of every sampled frame in the configured windows (or in `--from`/`--skip`/`--length` given on the command line), to help write the pattern.
 - After a refresh, overrides pointing to episodes that no longer exist produce warnings.
 - `showvenist bundle edit <show>` opens `$EDITOR` and validates on save, reopening the editor on errors.
 
@@ -572,6 +589,8 @@ Subtitle packets are spread through the whole file, so a full track means a full
 
 Each window is cached separately, so escalating never re-reads.
 
+**Title-card frames (decision 54).** Only for a show whose `overrides.yaml` has `title_card` (§6.6). For each configured window the file is seeked to the window and about one frame per second is decoded. With `background: dark`, only frames that are mostly black go to Tesseract (white-on-black cards, about 5% of an episode's frames); with `any`, every sampled frame does. The OCR text per frame is cached per file in `analysis.db` with the window and the pattern's hash, so a re-run reads nothing from disk. A window is a few minutes of video, never the whole file.
+
 **v2: credits frames.** Decode **keyframes only** over the first 12 and last 4 minutes (configurable). Blu-ray GOPs of about 1 second give roughly one frame per second, with sequential reads.
 
 **v3: speech-to-text.** faster-whisper on CPU (int8, small model) over the same sampled windows. Used only when a file has no usable subtitle track.
@@ -623,11 +642,13 @@ LLR_k(i,j) = log  P(observation_k | file i is episode j)
 | Guest character names | M3 | for only | IDF-weighted distinct guest character names heard in the dialogue; names that are dictionary words are filtered out | clamp +6 |
 | LLM | M3 (optional) | for and against | §10; replaces synopsis, guest characters and cues for the files it scores (§11.1) | w · (logit p_j + log(n − 1)) with n the candidates shown and p clipped to [0.01, 0.99]; w fitted, default 1 (decision 40) |
 | Dialogue cues | M3 (experimental) | for only | BM25 of the dialogue against each episode's `llm_cues`, ignoring cues that are cast or character names | Fitted separately; removed if the gate shows no gain |
+| Title card | post-M4 | for only | Text matching `title_card.pattern` (§6.6) read from video frames (§8.4); the `ref` group is normalized (`roman`/`number`: look-alike characters such as `l`, `|`, `1` → `I`) and compared exactly against the candidates' titles or numbers as a closed set; `title` uses the fuzzy ratio ≥ 90. Frames are combined by consensus: a reading counts when two or more frames agree or it matches a candidate exactly; frames that disagree (a fade from `LI` to `LII`) or a reading that matches nothing give 0 | +8 on one candidate; never negative, so a missed or garbled card cannot reject an episode |
 | Credits | v2 | for only | Fuzzy match of OCR'd credit text against the closed set of person names among the candidates (writers, directors, guest actors), IDF-weighted | clamp +8 |
 
 Notes:
 
 - **Track/container title** will rarely fire on raw rips. In 1,738 MakeMKV rips from the server, no title tag held an episode title: they hold disc names (§5.1) or nothing. It stays because it costs nothing and catches files tagged by other tools.
+- **Title card** exists only for shows that describe one in `overrides.yaml`. It reads video, not dialogue, so it shares no evidence with the dialogue scorers or the LLM and is summed in both regimes. On Samurai Jack the card was read in 9 of 10 episode files (the tenth is a half of a split two-parter, which has none), and for the other shows it adds nothing and costs nothing.
 - **Duration** mostly *rejects* extras and play-all titles. Within a season of identical runtimes it can't tell episodes apart, and its positive clamp reflects that.
 - **IDF weighting** (computed across the candidate set) automatically discounts what's common to every episode: main-cast names, subtitled theme songs, catchphrases.
 - **Guest characters** are kept separate from the synopsis scorer because TMDB's character lists are structured and far more reliable than words picked out of a synopsis. Synopses name guest characters too, so the synopsis and cues scorers ignore all cast and character names; otherwise one name heard in the dialogue would count two or three times.
@@ -724,8 +745,8 @@ S(i, unmatched) = 0          ← the background hypothesis is the reference poin
 
 | Regime | Scorers summed | Weights |
 |---|---|---|
-| Base (no LLM result) | duration, title, reference subtitles, synopsis, guest characters, cues | `[weights]` |
-| LLM (the LLM has scored the file) | duration, title, reference subtitles, LLM | `[weights.llm]` |
+| Base (no LLM result) | duration, title, title card, reference subtitles, synopsis, guest characters, cues | `[weights]` |
+| LLM (the LLM has scored the file) | duration, title, title card, reference subtitles, LLM | `[weights.llm]` |
 
 In the LLM regime, the LLM's evidence **replaces** the synopsis, guest and cues scorers, because it reads the same dialogue, synopses and guest names they do (§10.1). A refusal or failed call leaves the file in the base regime.
 
@@ -1120,7 +1141,7 @@ The order is chosen to **measure accuracy as early as possible**: the biggest un
 
 ### 17.3 Later
 
-- **v2:** credits OCR and the credits scorer; two-position candidates that resolve two-part episodes; flagging library files named with outdated numbering.
+- **v2:** credits OCR and the credits scorer (the title-card scorer, decision 54, shares its frame stage and is built earlier); two-position candidates that resolve two-part episodes; flagging library files named with outdated numbering.
 - **Possible future:** match extras to TMDB's Specials (S00) entries, which for many shows include the disc extras (Firefly's list has its gag reel, a making-of documentary and an audition tape). Matched extras would be named as specials, so Jellyfin shows them with titles instead of filing them under `extras/`.
 - **v3:** speech-to-text with faster-whisper on CPU (int8, small model) for files without usable subtitles.
 
@@ -1211,3 +1232,4 @@ Decisions made while writing this spec (2026-10-02) and reviewing it (from 2026-
 | 51 | An empty `.showvenist-ignore` file in a folder takes the folder out of scope: it is not analyzed, matched, renamed or moved, and is not a parse problem. The tree shows it as skipped. A file named explicitly on the command line is still the user's choice | Farscape's *The Peacekeeper Wars* (two files, 91.8 and 90.2 minutes) sits in its own folder because TMDB has no episode for it: the tool would have matched nothing, called both files extras, and planned to move them to `extras/`. Moving them into `Specials/` would not help, since TMDB's specials are all behind-the-scenes extras. Chosen by the user |
 | 52 | Near-duplicate detection (same episode, different bytes) uses dialogue containment ≥ 0.5 over word 5-grams, with at least 100 phrases per file, within one season's files; the primary copy is solved and the rest mirror it. Duplicates are never decided by duration or size | Checked on the library: Burn Notice S06 has exactly one near-duplicate pair (100% overlap, 1,403 of 1,403 phrases; sizes differ by one byte) and the next-highest overlap of any pair is 0.3%; four Burn Notice pairs with identical runtimes were three different episodes (0–2 shared phrases) and one true copy. Supernatural S02's duplicates are all exact. What the move plan does with duplicates (which copy keeps the episode name, where the others go) is decided in M5. Chosen by the user |
 | 53 | `overrides.yaml` can add episodes (`new_episodes`) and define an ordering that inherits another (`base` plus `entries` that replace whole seasons) | Samurai Jack season 4 on TMDB lists *Birth of Evil* as one 44-minute episode (aired S04E04, intended S03E11); the disks hold two parts just before the finale. No ordering in the bundle matched, labels like S04E12 could not resolve, and writing a whole 5-season ordering by hand to move two entries is error-prone. Requested by the user's library |
+| 54 | A **title-card scorer** is built ahead of v2: for a show whose `overrides.yaml` has `title_card` (windows measured from either end, a regex pattern, `kind` roman/number/title, `background` dark/any), it reads that card from video frames and matches it as a closed set against the candidates' titles. Evidence is for-only (+8), counted in both regimes, combined across frames by consensus (two agreeing frames or an exact title match; anything else is 0). The tool never guesses that a show has cards. `inspect --card` helps write the config. Eval reports a Problem when a card disagrees with a manifest label | On the 12 Samurai Jack files, a free spike (ffmpeg 1 fps over the last 3 minutes, mostly-black frames to Tesseract) read "EPISODE <numeral>" in 9 of 10 episode files, 31–43 s before the end; the tenth is half of a split two-parter and has none. TMDB's titles for the show are the numerals themselves, so the read is an exact match. It also showed that the two high-confidence "errors" in the weak-show LLM run were label errors (written in aired numbering under the `disk` ordering); the user keeps the show's own sequence numbering as the naming order. Samurai Jack's synopses and Roman-numeral titles carry almost no dialogue signal, so nothing else separates its episodes. Placed in `overrides.yaml` because it describes how a rip looks, not TMDB data, and `--refresh` must not touch it. Windows from either end because many shows put the card after the intro, not next to the credits. Chosen by the user |
