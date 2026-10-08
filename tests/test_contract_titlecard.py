@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from pydantic import ValidationError
 
-from showvenist.analysis.cardframes import card_params, read_cards
+from showvenist.analysis.cardframes import card_params
 from showvenist.analysis.types import EXTRACTOR_VERSIONS, CardRead
 from showvenist.bundle.overrides import BundleError, apply_overrides
 from showvenist.bundle.schema import Bundle, Episode, ShowInfo, TitleCardConfig
@@ -104,7 +104,7 @@ def test_card_reads_default_is_not_read():
     assert CardRead(12.0, "EPISODE X").offset_s == 12.0
 
 
-def test_stub_scorer_is_unavailable_everywhere():
+def test_no_config_is_unavailable_everywhere():
     b = bundle()
     ctx = ScoreContext(b, [Candidate(0, b.episodes[0], 1, 1)], load_config(None, env={}))
     res = TitleCardScorer().score([FileInfo(path="a", fingerprint="f", duration_s=1.0)], ctx)
@@ -123,13 +123,6 @@ def test_cache_params_depend_on_windows_and_background_not_on_pattern():
     assert card_params(base) == card_params(other_pattern)
     assert len({card_params(base), card_params(other_bg), card_params(other_win)}) == 3
     assert EXTRACTOR_VERSIONS["cardframes"] == 1
-
-
-def test_read_cards_is_a_stub_until_sv_8ue():
-    with pytest.raises(NotImplementedError):
-        read_cards(None, "f", 1.0, TitleCardConfig.model_validate({  # type: ignore[arg-type]
-            "windows": [{"from": "end", "length_seconds": 60}],
-            "pattern": "(?P<ref>x)", "kind": "roman"}))
 
 
 def test_card_config_rejects_unknown_keys():
