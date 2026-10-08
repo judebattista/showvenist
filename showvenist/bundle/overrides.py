@@ -17,6 +17,7 @@ from showvenist.bundle.schema import (
     OrderingEntry,
     SubtitleRef,
     Synopsis,
+    TitleCardConfig,
 )
 
 
@@ -81,7 +82,7 @@ def apply_overrides(bundle: Bundle, path: Path) -> Bundle:
     data, root = load_overrides_text(path)
     top = _map(root)
     for key, (knode, _) in top.items():
-        if key not in ("episodes", "orderings", "new_episodes"):
+        if key not in ("episodes", "orderings", "new_episodes", "title_card"):
             raise BundleError(path, f"unknown top-level key {key!r}", _line(knode))
 
     episodes = {e.id: e.model_copy(deep=True) for e in bundle.episodes}
@@ -149,10 +150,19 @@ def apply_overrides(bundle: Bundle, path: Path) -> Bundle:
             source=_ORDERING_SOURCE, type=_ORDERING_TYPE, name=name, entries=parsed
         )
 
+    title_card = None
+    if data.get("title_card") is not None:
+        try:
+            title_card = TitleCardConfig.model_validate(data["title_card"])
+        except ValidationError as e:
+            raise BundleError(path, f"title_card: {_verr(e)}",
+                              _line(top["title_card"][1])) from e
+
     merged = bundle.model_copy(
         update={
             "episodes": [episodes[e.id] for e in bundle.episodes] + [episodes[i] for i in added],
             "orderings": orderings,
+            "title_card": title_card,
         }
     )
     return merged.with_revision(path.parent)

@@ -29,7 +29,7 @@ from typing import Literal, Protocol
 
 import numpy as np
 
-from showvenist.analysis.types import Dialogue
+from showvenist.analysis.types import CardRead, Dialogue
 from showvenist.bundle.schema import Bundle, Episode
 from showvenist.config import Config
 
@@ -44,6 +44,7 @@ DEFAULT_CLAMPS: dict[str, tuple[float, float]] = {
     "synopsis": (0.0, 4.0),
     "guests": (0.0, 6.0),
     "cues": (0.0, 4.0),
+    "titlecard": (0.0, 8.0),
     # decision 40: the only clamp is the p clip to [0.01, 0.99]; with n candidates the evidence
     # lies in [-log(99) + log(n-1), +log(99) + log(n-1)]. The fusion clamp is a wide safety net.
     "llm": (-12.0, 12.0),
@@ -53,8 +54,8 @@ DEFAULT_WEIGHTS: dict[str, float] = {k: 1.0 for k in DEFAULT_CLAMPS}
 # Which scorers are summed in each regime (§11.1). A file is in the "llm" regime iff the LLM
 # scorer reports it `available`; the LLM then REPLACES synopsis, guests and cues.
 REGIME_SCORERS: dict[Regime, tuple[str, ...]] = {
-    "base": ("duration", "title", "refsubs", "synopsis", "guests", "cues"),
-    "llm": ("duration", "title", "refsubs", "llm"),
+    "base": ("duration", "title", "titlecard", "refsubs", "synopsis", "guests", "cues"),
+    "llm": ("duration", "title", "titlecard", "refsubs", "llm"),
 }
 
 PI_X_DEFAULT = 0.15  # expected share of extras (§11.2)
@@ -95,6 +96,9 @@ class FileInfo:
     disc: str | None = None
     dialogue: Dialogue | None = None  # None or track=None -> dialogue scorers report unavailable
     ocr_quality: float | None = None
+    # Title-card frames (§8.4). None = not read (show has no `title_card`, or not analyzed): the
+    # scorer reports unavailable. [] = read, nothing found: available, evidence 0.
+    card_reads: list[CardRead] | None = None
 
 
 @dataclass

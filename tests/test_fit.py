@@ -29,6 +29,7 @@ BASE = REGIME_SCORERS["base"]
 TRUE_W = {
     "duration": 0.6,
     "title": 1.5,
+    "titlecard": 1.0,
     "refsubs": 0.5,
     "synopsis": 2.0,
     "guests": 1.2,
@@ -41,6 +42,7 @@ def _raw(rng, E, signal_col):
     llr = {
         "duration": rng.normal(-1.0, 2.0, E),
         "title": np.where(rng.random(E) < 0.05, 6.0, 0.0),
+        "titlecard": np.where(rng.random(E) < 0.03, 8.0, 0.0),
         "refsubs": rng.normal(-1.0, 3.0, E),
         "synopsis": np.abs(rng.normal(0, 1.0, E)),
         "guests": np.abs(rng.normal(0, 1.5, E)) * (rng.random(E) < 0.3),

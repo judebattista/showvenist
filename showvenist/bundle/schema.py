@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 SCHEMA_VERSION = 1
 
@@ -128,6 +129,38 @@ class Provenance(_Model):
     conflict: dict[str, str] | None = None
 
 
+class TitleCardWindow(_Model):
+    """One span of video searched for the card (§6.6): `length_seconds` starting `skip_seconds`
+    from the chosen edge of the file (inward)."""
+
+    # `from` is a Python keyword; the YAML key is `from`
+    edge: Literal["start", "end"] = Field(alias="from")
+    skip_seconds: float = Field(0.0, ge=0)
+    length_seconds: float = Field(gt=0, le=600)
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+
+class TitleCardConfig(_Model):
+    """`title_card` in overrides.yaml (§6.6, decision 54). Absent = no card is ever read."""
+
+    windows: list[TitleCardWindow] = Field(min_length=1)
+    pattern: str  # regex with a named group `ref`; matched with re.search, case-insensitive
+    kind: Literal["roman", "number", "title"]
+    background: Literal["dark", "any"] = "dark"
+
+    @field_validator("pattern")
+    @classmethod
+    def _pattern_ok(cls, v: str) -> str:
+        try:
+            rx = re.compile(v, re.I)
+        except re.error as e:
+            raise ValueError(f"pattern is not a valid regex: {e}") from e
+        if "ref" not in rx.groupindex:
+            raise ValueError("pattern needs a named group (?P<ref>...)")
+        return v
+
+
 class Bundle(_Model):
     schema_version: Literal[1] = SCHEMA_VERSION
     bundle_revision: str = ""
@@ -137,6 +170,8 @@ class Bundle(_Model):
     provenance: list[Provenance] = Field(default_factory=list)
     # Series-level (main) cast; optional so bundles written before M3 still load.
     series_cast: list[CastEntry] = Field(default_factory=list)
+    # From overrides.yaml only (never written to show.json); None = the show has no title card.
+    title_card: TitleCardConfig | None = None
 
     def episode_by_id(self) -> dict[str, Episode]:
         return {e.id: e for e in self.episodes}
@@ -148,6 +183,8 @@ class Bundle(_Model):
         corrected reference .srt at the same path gives a new revision.
         """
         data = self.model_dump(mode="json", exclude={"bundle_revision", "provenance"})
+        if self.title_card is None:  # bundles without a card keep their earlier revision hash
+            data.pop("title_card", None)
         if bundle_dir is not None:
             files = {
                 s.path: hashlib.blake2b(

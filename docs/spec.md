@@ -589,7 +589,7 @@ Subtitle packets are spread through the whole file, so a full track means a full
 
 Each window is cached separately, so escalating never re-reads.
 
-**Title-card frames (decision 54).** Only for a show whose `overrides.yaml` has `title_card` (§6.6). For each configured window the file is seeked to the window and about one frame per second is decoded. With `background: dark`, only frames that are mostly black go to Tesseract (white-on-black cards, about 5% of an episode's frames); with `any`, every sampled frame does. The OCR text per frame is cached per file in `analysis.db` with the window and the pattern's hash, so a re-run reads nothing from disk. A window is a few minutes of video, never the whole file.
+**Title-card frames (decision 54).** Only for a show whose `overrides.yaml` has `title_card` (§6.6). For each configured window the file is seeked to the window and about one frame per second is decoded. With `background: dark`, only frames that are mostly black go to Tesseract (white-on-black cards, about 5% of an episode's frames); with `any`, every sampled frame does. The OCR text per frame is cached per file in `analysis.db` under the windows and the background setting, so a re-run reads nothing from disk, and editing the regex (which only filters the cached text) never re-reads video. A window is a few minutes of video, never the whole file.
 
 **v2: credits frames.** Decode **keyframes only** over the first 12 and last 4 minutes (configurable). Blu-ray GOPs of about 1 second give roughly one frame per second, with sequential reads.
 

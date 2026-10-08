@@ -43,11 +43,12 @@ def bundle_path(slug: str, root: Path | None = None) -> Path:
 def save_bundle(bundle: Bundle, root: Path | None = None) -> Path:
     """Write show.json atomically; returns its path. Revision is recomputed."""
     d = bundle_path(slugify(bundle.show.title, bundle.show.year), root)
-    bundle = bundle.with_revision(d)
+    # title_card comes from overrides.yaml only; it never reaches show.json or its revision
+    bundle = bundle.model_copy(update={"title_card": None}).with_revision(d)
     d.mkdir(parents=True, exist_ok=True)
     target = d / "show.json"
-    text = json.dumps(bundle.model_dump(mode="json"), indent=2, sort_keys=True,
-                      ensure_ascii=False) + "\n"
+    data = bundle.model_dump(mode="json", exclude={"title_card"})
+    text = json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
     fd, tmp = tempfile.mkstemp(dir=d, prefix=".show.json.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:

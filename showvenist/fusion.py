@@ -21,7 +21,7 @@ from showvenist.scoring.types import (
 
 # Scorers that can't produce negative evidence (§9.2 "for only"). Their lower clamp is forced to
 # 0 whatever `clamps` says, so they never lower S.
-FOR_ONLY = frozenset({"title", "synopsis", "guests", "cues"})
+FOR_ONLY = frozenset({"title", "titlecard", "synopsis", "guests", "cues"})
 
 
 def log_prior(n_candidates: int, pi_x: float = PI_X_DEFAULT) -> float:

@@ -51,6 +51,7 @@ class LlmWeights(_Section):
 
     duration: float = 1.0
     title: float = 1.0
+    titlecard: float = 1.0
     refsubs: float = 1.0
     llm: float = 1.0
 
@@ -60,6 +61,7 @@ class WeightsConfig(_Section):
 
     duration: float = 1.0
     title: float = 1.0
+    titlecard: float = 1.0
     refsubs: float = 1.0
     synopsis: float = 1.0
     guests: float = 1.0

@@ -39,7 +39,9 @@ TEXT_CODECS = frozenset({"subrip", "srt", "ass", "ssa", "mov_text", "webvtt", "t
 BITMAP_CODECS = {"hdmv_pgs_subtitle": "pgs", "dvd_subtitle": "vobsub"}
 
 # Bump an extractor's version to invalidate its cached entries (§7.3).
-EXTRACTOR_VERSIONS: dict[str, int] = {"probe": 2, "text": 1, "ocr": 2, "window": 2, "llm": 1}
+EXTRACTOR_VERSIONS: dict[str, int] = {
+    "probe": 2, "text": 1, "ocr": 2, "window": 2, "llm": 1, "cardframes": 1,
+}
 
 UNKNOWN_EVENTS = -1  # SubtitleTrack.events when the container has no frame-count tag
 
@@ -114,6 +116,14 @@ class Dialogue:
     @property
     def text(self) -> str:
         return " ".join(c.text for w in self.windows for c in w.cues)
+
+
+@dataclass(frozen=True)
+class CardRead:
+    """OCR text of one sampled frame in a title-card window (§8.4, decision 54)."""
+
+    offset_s: float  # frame position from the start of the file
+    text: str  # whitespace-collapsed OCR text, never empty
 
 
 def params_hash(**params: object) -> str:
