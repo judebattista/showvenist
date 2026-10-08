@@ -357,3 +357,14 @@ def test_sheet_labels_use_the_per_show_default_ordering(tmp_path):
     assert [(r[1], r[3]) for r in sheet_to_rows(sheet)] == [
         ("Samurai_Jack", "disk"), ("Firefly", "intended-order"), ("Supernatural", "aired")]
     assert sheet_to_rows(sheet, {"Supernatural": "dvd"})[2][3] == "dvd"
+
+
+def test_west_wing_season_three_defaults_to_the_bluray_order(tmp_path):
+    from showvenist.eval.mkmanifest import build_rows
+
+    for sub in ("Season_02", "Season_03"):
+        d = tmp_path / "The_West_Wing" / sub
+        d.mkdir(parents=True)
+        (d / f"the_west_wing_s0{sub[-1]}e01.mkv").write_bytes(b"x")
+    rows = {r[0].split("/")[1]: r[3] for r in build_rows(tmp_path)}
+    assert rows == {"Season_02": "aired", "Season_03": "blu-ray-order"}

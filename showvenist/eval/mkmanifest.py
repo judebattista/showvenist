@@ -24,6 +24,9 @@ _DISC = re.compile(r"disc[ _-]?(\d+)", re.I)
 # Samurai Jack: the Blu-ray disks split TMDB's combined entries, so labels use the `disk`
 # ordering defined in the bundle's overrides.yaml
 DEFAULT_ORDERS = {"Firefly": "intended-order", "Samurai_Jack": "disk"}
+# West Wing season 3 is numbered like TMDB's Blu-ray/DVD order (it includes the special
+# "Isaac and Ishmael"), the other seasons like the aired order
+DEFAULT_SEASON_ORDERS = {("The_West_Wing", 3): "blu-ray-order"}
 
 
 def _slug_from_dirname(dirname: str) -> str:
@@ -105,6 +108,9 @@ def build_rows(
 
         # Get ordering
         order = orders.get(show_dir, "aired")
+        m_season = re.search(r"season[ _-]?0*(\d+)", rel_path, re.IGNORECASE)
+        if m_season and (show_dir, int(m_season.group(1))) in DEFAULT_SEASON_ORDERS:
+            order = DEFAULT_SEASON_ORDERS[(show_dir, int(m_season.group(1)))]
 
         # Get disc number
         disc = _get_disc(rel_path)
