@@ -85,7 +85,8 @@ def test_run_eval_two_seasons(corpus, tmp_path):
     assert len(table) == 3  # the duplicate is not a separate row
     r0 = table[0]
     assert r0.candidates == ["tmdb:200", "tmdb:201", "tmdb:202", "tmdb:203"]
-    assert set(r0.llr) == {"duration", "title", "refsubs", "synopsis", "guests", "cues"}
+    assert set(r0.llr) == {
+        "duration", "title", "titlecard", "refsubs", "synopsis", "guests", "cues"}
     assert all(v.shape == (4,) for v in r0.llr.values())
     assert r0.target == 1 and r0.label_kind == "episode"
     assert int(np.argmax(r0.llr["refsubs"])) == 1

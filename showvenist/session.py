@@ -43,6 +43,7 @@ from pathlib import Path
 
 import numpy as np
 
+from showvenist.analysis.cardframes import read_cards
 from showvenist.analysis.duplicates import (
     Quality,
     Shingles,
@@ -83,6 +84,7 @@ from showvenist.scoring.llm import floor_evidence
 from showvenist.scoring.refsubs import RefsubsScorer
 from showvenist.scoring.synopsis import SynopsisScorer
 from showvenist.scoring.title import TitleScorer
+from showvenist.scoring.titlecard import TitleCardScorer
 from showvenist.scoring.types import (
     HIGH_DELTA,
     Assignment,
@@ -129,6 +131,7 @@ def default_scorers() -> list[Scorer]:
     return [
         DurationScorer(),
         TitleScorer(),
+        TitleCardScorer(),
         RefsubsScorer(),
         SynopsisScorer(),
         GuestScorer(),
@@ -505,6 +508,7 @@ class Session:
                         disc=self._disc_name(r.path),
                         dialogue=r.dialogue,
                         ocr_quality=r.dialogue.ocr_quality if r.dialogue else None,
+                        card_reads=self._read_cards(r.path, r.fingerprint, r.probe.duration_s),
                     )
                 )
         for dup, primary in list(self._exact.items()):
@@ -515,6 +519,18 @@ class Session:
         self._find_near()
         self._evidence_changed(reset_llm=True)
         return list(self.files)
+
+    def _read_cards(self, path: Path, fp: str, duration_s: float):
+        """Title-card OCR reads (§8.4) when the show has `title_card`; None (no video touched)
+        otherwise. Never fails an analysis. Files are read one at a time, so two reads of one
+        storage root never overlap."""
+        cfg = self.bundle.title_card
+        if cfg is None:
+            return None
+        try:
+            return read_cards(path, fp, duration_s, cfg, self.cache)
+        except Exception:
+            return []
 
     def _find_near(self) -> None:
         """Near duplicates (§14) among the analyzed files of this session (one season; named

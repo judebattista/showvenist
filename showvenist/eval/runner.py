@@ -286,6 +286,38 @@ def _decisions(
     return out
 
 
+def _card_problems(
+    session: Session, solution: Solution, by_path: Mapping[Path, ResolvedLabel]
+) -> list[Problem]:
+    """Audit (spec §9.2 note): a file whose title card matched exactly one candidate that is not
+    its label's episode. Metrics are untouched; the label stays the truth. Extras, `episode?`
+    and multi-episode labels are skipped."""
+    res = solution.results.get("titlecard")
+    if res is None:
+        return []
+    out: list[Problem] = []
+    by_id = session.bundle.episode_by_id()
+    for i, f in enumerate(session.files):
+        lab = by_path.get(f.path)
+        if lab is None or lab.kind != "episode" or lab.episode_ids or lab.episode_id is None:
+            continue
+        if i >= res.llr.shape[0] or not res.available[i]:
+            continue
+        hit = [j for j in range(res.llr.shape[1]) if res.llr[i, j] > 0]
+        if len(hit) != 1:
+            continue
+        cand = solution.candidates[hit[0]]
+        if cand.id == lab.episode_id:
+            continue
+        ep = by_id.get(lab.episode_id)
+        out.append(Problem(
+            lab.row,
+            f"card says {cand.episode.title} but the label is {lab.row.label} "
+            f"({ep.title if ep else lab.episode_id})",
+        ))
+    return out
+
+
 def run_eval(
     manifest_rows: Iterable[ManifestRow],
     bundles: Mapping[str, Bundle],
@@ -416,6 +448,7 @@ def run_eval(
                     cost[run.key] += llm.total_cost_usd
                 else:
                     run.llm_refused = True
+        problems += _card_problems(session, solution, by_path)
         t3 = time.perf_counter()
         run.seconds = {"analyze": t1 - t0, "score": t2 - t1, "solve": t3 - t2, "total": t3 - t0}
         for path, d in _decisions(session, solution).items():

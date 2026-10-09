@@ -120,12 +120,56 @@ def inspect_cmd(
     show: str | None = typer.Option(None, "--show", help="Bundle slug (vocabulary, language)"),
     language: str = typer.Option("en", "--language"),
     root: Path | None = typer.Option(None, "-o", help="Bundle root directory"),
+    card: bool = typer.Option(
+        False, "--card", help="Print the OCR'd text of every sampled frame in the show's "
+        "title_card windows (needs --show, or --from/--skip/--length)"),
+    card_from: str | None = typer.Option(
+        None, "--from", help="--card: window edge, start or end (with --skip and --length)"),
+    skip: float | None = typer.Option(None, "--skip", help="--card: seconds to skip from the edge"),
+    length: float | None = typer.Option(None, "--length", help="--card: window length, seconds"),
+    dark: bool = typer.Option(
+        False, "--dark", help="--card, ad-hoc windows: only mostly-black frames (default: any)"),
 ) -> None:
     """Dump the extracted dialogue and signals for one file (debugging)."""
     from showvenist.analysis.cache import AnalysisCache
-    from showvenist.analysis.inspect import inspect_file
+    from showvenist.analysis.inspect import inspect_card, inspect_file
     from showvenist.bundle.store import load_bundle
     from showvenist.config import cache_dir, load_config
+
+    adhoc = (card_from, skip, length)
+    if not card and (any(x is not None for x in adhoc) or dark):
+        _fail("--from, --skip, --length and --dark need --card")
+    if card:
+        from showvenist.bundle.schema import TitleCardConfig
+
+        if any(x is not None for x in adhoc):
+            if not all(x is not None for x in adhoc):
+                _fail("--from, --skip and --length go together")
+            if card_from not in ("start", "end"):
+                _fail("--from must be start or end")
+            try:
+                tc = TitleCardConfig.model_validate({
+                    "windows": [{"from": card_from, "skip_seconds": skip,
+                                 "length_seconds": length}],
+                    "pattern": "(?P<ref>.)", "kind": "title",
+                    "background": "dark" if dark else "any"})
+            except ValueError as e:
+                _fail(f"invalid window: {e}")
+        else:
+            tc = None
+            if show:
+                try:
+                    tc = load_bundle(show, root).title_card
+                except Exception as e:
+                    _fail(str(e))
+            if tc is None:
+                _fail("no title_card configured" + (f" for {show}" if show else "")
+                      + ": give --show NAME with a title_card in its overrides.yaml, or "
+                      "--from, --skip and --length")
+        cache_dir().mkdir(parents=True, exist_ok=True)
+        cache = AnalysisCache(cache_dir() / "analysis.db")
+        typer.echo(inspect_card(file, tc, cache))
+        return
 
     vocab: set[str] = set()
     if show:
@@ -167,7 +211,7 @@ def _resolve_bundle(show: str, root: Path | None):
         raise typer.Exit(1) from None
 
 
-SCORER_NAMES = ("duration", "title", "refsubs", "synopsis", "guests", "cues", "llm")
+SCORER_NAMES = ("duration", "title", "titlecard", "refsubs", "synopsis", "guests", "cues", "llm")
 LLM_MODES = ("off", "auto", "all")
 # Builds the Anthropic client for the LLM scorer. None = the real client (lazy `anthropic`
 # import, only once a call is approved). Tests inject a fake here; nothing else should.

@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from showvenist.analysis.cardframes import read_cards
 from showvenist.analysis.probe import probe
 from showvenist.analysis.types import AnalysisCache
 from showvenist.analysis.windows import extract_dialogue
+from showvenist.bundle.schema import TitleCardConfig
 from showvenist.config import AnalysisConfig
 from showvenist.state.fingerprint import content_key, fingerprint
 
@@ -58,4 +60,21 @@ def inspect_file(
     first = [c for w in d.windows for c in w.cues][:5]
     for c in first:
         out.append(f"  [{c.start_s:8.1f}] {c.text.strip().replace(chr(10), ' / ')}")
+    return "\n".join(out) + "\n"
+
+
+def inspect_card(path: Path, cfg: TitleCardConfig, cache: AnalysisCache | None = None) -> str:
+    """OCR'd text of every sampled frame over `cfg.windows` (`inspect --card`, spec §6.6).
+    Reads through the card cache, so a repeat with the same windows and background reads no
+    video."""
+    path = Path(path)
+    info = probe(path, cache)
+    reads = read_cards(path, fingerprint(path), info.duration_s, cfg, cache)
+    out = [f"file:         {path}", f"duration:     {info.duration_s:.1f} s", "windows:"]
+    for w in cfg.windows:
+        out.append(f"  from {w.edge}: skip {w.skip_seconds:g} s, length {w.length_seconds:g} s")
+    out.append(f"background:   {cfg.background}")
+    out.append(f"frames with text ({len(reads)}):")
+    for r in reads:
+        out.append(f"  {r.offset_s:8.1f} s  {r.text}")
     return "\n".join(out) + "\n"
