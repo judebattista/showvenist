@@ -19,6 +19,8 @@ SkipReason = Literal[
     "already_in_place", # the target is the file's own path
     "confirmed_extra",  # already a confirmed extra in history (re-runs skip it)
     "duplicate_primary_missing",
+    "duplicate_of_extra",  # a copy of an extra: left as it is (decision 56 names episodes only)
+    "excluded",         # unticked on the plan screen (PlanOptions.exclude)
 ]
 
 
@@ -41,6 +43,10 @@ class PlannedMove:
     pinned: bool = False
     confidence: Literal["high", "medium", "low"] | None = None
     reason: str = ""  # one line for the plan listing
+    # already a confirmed match in history (flag `confirmed`): apply links the existing match
+    # and writes no new one, so undoing this run never undoes an earlier decision
+    confirmed: bool = False
+    disc: str | None = None  # disc label from the report: kept in media_file (survives flattening)
 
 
 @dataclass(frozen=True)
@@ -69,7 +75,10 @@ class Plan:
     # Preflight failures (permission, cross-filesystem, unresolvable target...). Any entry means
     # nothing may be applied (§13.3).
     errors: list[str] = field(default_factory=list)
-    cross_filesystem: list[PlannedMove] = field(default_factory=list)  # need their own confirmation
+    # Moves that cross filesystems (not atomic: copy, verify, then remove the original). They
+    # are only performed when apply_plan's `confirm_cross_fs` callback agrees (§13.3).
+    cross_filesystem: list[PlannedMove] = field(default_factory=list)
+    bundle_revision: str | None = None  # recorded with each confirmed match
 
     @property
     def ok(self) -> bool:

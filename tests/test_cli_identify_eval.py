@@ -359,5 +359,5 @@ def test_identify_near_duplicate_and_allow_duplicates(tmp_path, monkeypatch, all
     if allow:
         assert note.endswith("kept as another version of S01E02 (--allow-duplicates)")
     else:
-        assert "will not be moved to an episode name" in note
+        assert "renames it" in note and "_dupe_N" in note
     assert not any("not implemented" in n for n in report["notices"])

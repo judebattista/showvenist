@@ -143,7 +143,7 @@ def test_near_duplicate_collapsed_into_the_better_copy(season, tmp_path):
     note = [n for n in rep.notices if "looks like a copy" in n]
     assert len(note) == 1 and note[0].startswith("t02.mkv looks like a copy of t00.mkv")
     assert "dialogue overlap" in note[0] and "S01E03" in note[0]
-    assert "will not be moved to an episode name" in note[0]
+    assert "_dupe_N" in note[0]
 
     # idempotent: analyzing again changes nothing, and the near duplicate isn't re-read
     seen = []

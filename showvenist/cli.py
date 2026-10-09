@@ -599,7 +599,8 @@ def identify(
         None, "--llm", help="off|auto|all (default: llm.mode in config.toml, normally off)"
     ),
     yes: bool = typer.Option(
-        False, "--yes", help="Allow the paid LLM calls whose estimated cost is printed"
+        False, "--yes", help="Allow the paid LLM calls whose estimated cost is printed; with "
+        "--apply, also move files without typing yes (needed without a TTY)"
     ),
     reanalyze: bool = typer.Option(
         False, "--reanalyze", help="Ignore files already confirmed in history (analyze them again)"
@@ -612,12 +613,22 @@ def identify(
         help="Emit the versioned JSON report (a JSON array of reports when several seasons "
         "are solved)",
     ),
+    as_plan: bool = typer.Option(
+        False, "--plan", help="Print the exact move list after the report; writes nothing"
+    ),
+    do_apply: bool = typer.Option(
+        False, "--apply",
+        help="Print the plan, then move the files after you type yes (without a TTY only "
+        "with --yes)",
+    ),
     root: Path | None = typer.Option(None, "-o", help="Bundle root directory"),
 ) -> None:
-    """Identify files against a show's bundle (report mode; never touches the media).
+    """Identify files against a show's bundle (report mode never touches the media).
 
     PATHS may be files or Show / Season / Disc folders (§5). The parsed tree is printed to
-    stderr before analysis. Each season in the tree is solved on its own and reported."""
+    stderr before analysis. Each season in the tree is solved on its own and reported.
+    --plan adds the move list (§13) and writes nothing; --apply moves the files after a typed
+    yes, with a move log that `showvenist undo` reverses."""
     import json as _json
     from dataclasses import replace
 
@@ -631,8 +642,11 @@ def identify(
     from showvenist.state.db import StateDb, state_db_path
     from showvenist.state.history import History
 
-    if as_report and as_json:
-        _fail("--report and --json are exclusive")
+    if sum((as_report, as_json, as_plan, do_apply)) > 1:
+        _fail("--report, --json, --plan and --apply are exclusive")
+    if do_apply and not yes and not _interactive():
+        _fail("identify --apply: no TTY, so nothing is moved; use --plan to see the moves, or "
+              "add --yes to apply them from a script")
     cfg = load_config()
     hcfg = cfg.hierarchy
     sig = _parse_signals(signals)
@@ -641,7 +655,8 @@ def identify(
         wanted = _parse_episodes(episodes, season) if episodes else None
     except ValueError as e:
         _fail(str(e))
-    interactive = _interactive() and not (as_report or as_json)  # report mode never prompts
+    # report mode and --plan never prompt
+    interactive = _interactive() and not (as_report or as_json or as_plan)
     paths = [Path(p) for p in paths]
 
     # --- show, marker ---
@@ -805,6 +820,14 @@ def identify(
             )
         reports.append(report)
 
+    if as_plan or do_apply:
+        try:
+            code = _plan_and_apply(reports, bundle, cfg, marker, hist, hist_db, do_apply,
+                                   yes, interactive, exit_code, render_tables)
+        finally:
+            if hist_db is not None:
+                hist_db.close()
+        raise typer.Exit(code)
     if hist_db is not None:
         hist_db.close()
     done = reports
@@ -819,6 +842,79 @@ def identify(
                 typer.echo(f"== {_season_title(r.season)} ==")
             typer.echo(render_tables(r))
     raise typer.Exit(_final_exit_code(done, exit_code))
+
+
+def _typed_yes(question: str) -> bool:
+    return typer.prompt(f"{question} Type yes to go ahead", default="",
+                        show_default=False).strip() == "yes"
+
+
+def _plan_and_apply(reports, bundle, cfg, marker, hist, hist_db, do_apply: bool, yes: bool,
+                    interactive: bool, exit_code, render_tables) -> int:
+    """identify --plan / --apply (§4.3, decision 58): one plan per solved season, built by
+    rename.plan.build_plan, printed in full; --apply moves through rename.movelog.apply_plan.
+    --plan writes nothing: state.db is read only when it already exists."""
+    from showvenist.rename.movelog import PlanRefused, apply_plan
+    from showvenist.rename.plan import build_plan
+    from showvenist.rename.render import format_apply, format_plan
+    from showvenist.rename.types import PlanOptions
+    from showvenist.state.db import StateDb
+
+    opts = PlanOptions(
+        naming_order=marker.naming_order if marker is not None else None,
+        template=cfg.naming.template, move_extras=cfg.naming.move_extras,
+    )
+    codes = [_final_exit_code(reports, exit_code)]
+    plans = []
+    for r in reports:
+        if len(reports) > 1:
+            typer.echo(f"== {_season_title(r.season)} ==")
+        typer.echo(render_tables(r))
+        try:
+            plan = build_plan(r, bundle, opts, history=hist)
+        except ValueError as e:
+            _fail(f"identify: {e}")
+        typer.echo(format_plan(plan))
+        plans.append(plan)
+        if not plan.ok:
+            codes.append(1)
+    if not do_apply:
+        return max(codes)
+    if any(not p.ok for p in plans):
+        typer.echo("Not applied: the plan has errors (nothing was moved).", err=True)
+        return 1
+    if not any(p.moves for p in plans):
+        typer.echo("Nothing to move.")
+        return max(codes)
+    db = hist_db if hist_db is not None else StateDb.open_default()
+    try:
+        for plan in plans:
+            if not plan.moves:
+                continue
+
+            def confirm(p) -> bool:
+                return yes or _typed_yes(f"Move {len(p.moves)} file(s) as listed above?")
+
+            def confirm_cross(ms) -> bool:
+                # crossing filesystems copies and removes: always typed, never by --yes alone
+                return interactive and _typed_yes(
+                    f"{len(ms)} move(s) cross filesystems (copy, check, then remove the "
+                    "original).")
+
+            try:
+                res = apply_plan(plan, db, command="identify --apply",
+                                 args=" ".join(sys.argv[1:]), confirm=confirm,
+                                 confirm_cross_fs=confirm_cross)
+            except PlanRefused as e:
+                typer.echo(f"Not applied: {e}", err=True)
+                return 1
+            typer.echo(format_apply(res))
+            if res.cancelled or res.failed:
+                codes.append(1)
+    finally:
+        if db is not hist_db:
+            db.close()
+    return 1 if 1 in codes else max(codes)
 
 
 def _final_exit_code(reports, exit_code) -> int:
@@ -872,10 +968,14 @@ def assign(
         None, "--order", help="Ordering the episode is written in (default: the show's "
         "naming_order)"),
     extra: bool = typer.Option(False, "--extra", help="Record the file as a confirmed extra"),
-    yes: bool = typer.Option(False, "--yes", help="Do not ask before writing"),
+    rename: bool = typer.Option(
+        False, "--rename", help="Also rename/move the file as the plan rules say (§13): shows "
+        "the planned move and asks y/N"),
+    yes: bool = typer.Option(False, "--yes", help="Do not ask before writing (or moving)"),
     root: Path | None = typer.Option(None, "-o", help="Bundle root directory"),
 ) -> None:
-    """Record a confirmed match by hand (source manual). Never moves or renames a file."""
+    """Record a confirmed match by hand (source manual). Moves or renames the file only with
+    --rename."""
     from showvenist.config import bundles_dir, load_config
     from showvenist.eval.harness import resolve_labels
     from showvenist.eval.types import ManifestRow
@@ -920,6 +1020,10 @@ def assign(
         what = f"S{season:02d}E{number:02d} {title!r}"
     fp, size = _state_file(file)
     abs_path = str(file.resolve())
+    if rename:
+        naming = marker.naming_order if marker is not None else None
+        _assign_rename(Path(abs_path), fp, slug, bundle, eid, naming, yes)
+        return
     with StateDb.open_default() as db:
         hist = History(db)
         typer.echo(f"{file.name}: {what} in {slug} (ordering {okey}), source manual")
@@ -942,6 +1046,118 @@ def assign(
         hist.confirm(fp, slug, episode_id=eid, season=season, episode=number, title=title,
                      source="manual", run_id=run.id)
     typer.echo(f"Recorded (run {run.id}). Nothing was moved or renamed.")
+
+
+def _assign_rename(file: Path, fp: str, slug: str, bundle, eid: str | None,
+                   naming_order: str | None, yes: bool) -> None:
+    """assign --rename: a one-file plan (pinned, so the match is recorded with source manual
+    by the move itself), shown in full, applied after y/N. When the file needs no move, the
+    match is recorded as a plain assign."""
+    from showvenist.config import load_config
+    from showvenist.hierarchy.parse import parse_disc
+    from showvenist.rename.movelog import PlanRefused, apply_plan
+    from showvenist.rename.plan import build_plan
+    from showvenist.rename.render import format_apply, format_plan
+    from showvenist.rename.types import PlanOptions
+    from showvenist.report import format_odds
+    from showvenist.report_schema import (
+        Confidence,
+        Decision,
+        EpisodeRef,
+        FileReport,
+        Report,
+        Summary,
+    )
+    from showvenist.state.db import StateDb
+    from showvenist.state.history import History
+
+    cfg = load_config()
+    ref = None
+    if eid is not None:
+        ep = bundle.episode_by_id()[eid]
+        ent = next(e for o in bundle.orderings.values() for e in o.entries
+                   if e.episode_id == eid)
+        ref = EpisodeRef(episode_id=eid, season=ent.season, episode=ent.episode, title=ep.title)
+    disc = file.parent.name if parse_disc(file.parent.name, cfg.hierarchy.disc_patterns) else None
+    row = FileReport(
+        path=str(file), fingerprint=fp, disc=disc, duration_s=0.0, regime="base",
+        decision=Decision(kind="episode" if ref else "extra", episode=ref),
+        confidence=Confidence(level="high", delta=None, odds=format_odds(None)),
+        flags=["pinned"],
+    )
+    report = Report(tool_version="", show_slug=slug, bundle_revision=bundle.bundle_revision,
+                    ordering=naming_order or "aired", files=[row],
+                    summary=Summary(files=1, high=1, medium=0, low=0, extras=int(ref is None)))
+    opts = PlanOptions(naming_order=naming_order, template=cfg.naming.template)
+    with StateDb.open_default() as db:
+        hist = History(db)
+        try:
+            plan = build_plan(report, bundle, opts, history=hist)
+        except ValueError as e:
+            _fail(f"assign: {e}")
+        typer.echo(format_plan(plan))
+        if not plan.ok:
+            _fail("assign: not applied, the plan has errors (nothing was written)")
+        if not plan.moves:
+            if not yes and not typer.confirm("Nothing to move. Record the match anyway?",
+                                             default=False):
+                typer.echo("Nothing written.")
+                raise typer.Exit(1)
+            hist.touch_file(fp, size=file.stat().st_size, path=str(file), show_slug=slug)
+            run = hist.begin_run("assign", f"{file} {eid or '--extra'}")
+            ent = (next(e for e in bundle.orderings[plan.naming_order].entries
+                        if e.episode_id == eid) if eid else None)
+            hist.confirm(fp, slug, episode_id=eid, season=ent.season if ent else None,
+                         episode=ent.episode if ent else None,
+                         title=bundle.episode_by_id()[eid].title if eid else None,
+                         source="manual", run_id=run.id)
+            typer.echo(f"Recorded (run {run.id}). Nothing was moved.")
+            return
+
+        def confirm(p) -> bool:
+            return yes or typer.confirm("Move it and record the match?", default=False)
+
+        try:
+            res = apply_plan(plan, db, command="assign --rename",
+                             args=f"{file} {eid or '--extra'}", confirm=confirm,
+                             confirm_cross_fs=lambda ms: typer.confirm(
+                                 "This move crosses filesystems (copy, check, then remove the "
+                                 "original). Go ahead?", default=False))
+        except PlanRefused as e:
+            _fail(f"assign: {e}")
+        typer.echo(format_apply(res))
+        if res.cancelled or res.failed:
+            raise typer.Exit(1)
+
+
+@app.command()
+def undo(
+    run_id: int | None = typer.Argument(None, help="Run to reverse (default: the latest)"),
+    last: bool = typer.Option(False, "--last", help="Reverse the latest run with moves"),
+    yes: bool = typer.Option(False, "--yes", help="Do not ask before moving files back"),
+) -> None:
+    """Reverse an applied rename run: shows its moves, asks y/N, moves files back in reverse
+    order; the run's matches become undone (§13.5). Never overwrites; folders stay."""
+    from showvenist.rename.render import format_ops, format_undo
+    from showvenist.rename.undo import undo_run
+    from showvenist.state.db import StateDb, state_db_path
+
+    if last and run_id is not None:
+        _fail("undo: give --last or a RUN_ID, not both")
+    if not state_db_path().exists():
+        _fail("undo: no runs recorded (no state.db)")
+
+    def confirm(ops) -> bool:
+        typer.echo(format_ops(ops))
+        return yes or typer.confirm(f"Move {len(ops)} file(s) back?", default=False)
+
+    with StateDb.open_default() as db:
+        res = undo_run(db, run_id, confirm=confirm)
+    if res.run_id is None or (not res.undone and not res.skipped and not res.cancelled):
+        _fail("undo: nothing to undo" + (f" in run {run_id}" if run_id is not None else ""))
+    typer.echo(format_undo(res))
+    if res.cancelled or res.skipped:
+        raise typer.Exit(1)
 
 
 @app.command("history")

@@ -1306,8 +1306,8 @@ class Session:
                 out.append(f"{head}: kept as another version of {what} (--allow-duplicates)")
             else:
                 out.append(
-                    f"{head}: a duplicate of {what} to review; it will not be moved to an "
-                    "episode name (keep it with --allow-duplicates, or delete it)"
+                    f"{head}: a duplicate of {what} to review; a plan leaves it in its folder and "
+                    "renames it <episode>_dupe_N (keep it as a version with --allow-duplicates)"
                 )
         return out
 
@@ -1341,7 +1341,13 @@ class Session:
             self._plain_row(info, "extra", None, [FLAG_CONFIRMED], high=True)
             for info in self.confirmed_extras.values()
         ]
-        all_rows = [*rep.files, *extra_rows]
+        dup = self._duplicate_ranks()
+        all_rows = [
+            r.model_copy(update={"duplicate_of": str(dup[r.path][0]),
+                                 "duplicate_rank": dup[r.path][1]})
+            if r.path in dup else r
+            for r in [*rep.files, *extra_rows]
+        ]
         all_rows.sort(key=lambda r: (r.disc is None, r.disc or "", r.path))
         return rep.model_copy(
             update={
@@ -1356,6 +1362,24 @@ class Session:
                 "notices": notices,
             }
         )
+
+    def _duplicate_ranks(self) -> dict[str, tuple[Path, int]]:
+        """Report path -> (primary, 0-based rank among that primary's copies), exact and near
+        duplicates (decision 56). Ranked like `choose_primary`: most usable dialogue, then the
+        larger file, then path. An exact copy ranks with the quality of the file it copies."""
+        groups: dict[Path, list[Path]] = {}
+        for d, p in self.duplicates.items():
+            groups.setdefault(p, []).append(d)
+
+        def key(d: Path):
+            q = self._quality.get(d) or self._quality.get(self._exact.get(d, d)) or Quality()
+            return (-q.usable_lines, -q.size, d)
+
+        out: dict[str, tuple[Path, int]] = {}
+        for p, copies in groups.items():
+            for rank, d in enumerate(sorted(copies, key=key)):
+                out[str(d)] = (p, rank)
+        return out
 
     def _notices(self, sol: Solution | None) -> list[str]:
         out = [] if sol is None else list(sol.notices)

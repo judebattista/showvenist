@@ -84,21 +84,20 @@ def test_history_api_is_implemented():
     assert h.highest_dupe_index("s", "tmdb:1") == 0
 
 
-def test_rename_functions_are_stubs_until_sv_o4f_3(tmp_path):
+def test_rename_functions_are_implemented(tmp_path):
     plan = Plan(show_slug="s", naming_order="aired")
     assert plan.ok
+    assert find_sidecars(tmp_path / "a.mkv") == []
+    d = db()
+    assert recover(d).unresolved == []
+    res = apply_plan(plan, d, command="identify", args="", confirm=lambda p: True)
+    assert res.done == [] and res.run_id == 0  # an empty plan records no run
+    assert undo_run(d, None, confirm=lambda ops: True).run_id is None
     plan.errors.append("no write permission")
     assert not plan.ok
-    with pytest.raises(NotImplementedError):
-        find_sidecars(tmp_path / "a.mkv")
-    with pytest.raises(NotImplementedError):
-        recover(db())
-    with pytest.raises(NotImplementedError):
-        apply_plan(plan, db(), command="identify", args="", confirm=lambda p: True)
-    with pytest.raises(NotImplementedError):
-        undo_run(db(), None, confirm=lambda ops: True)
-    with pytest.raises(NotImplementedError):
-        build_plan(None, None, None)  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        apply_plan(plan, d, command="identify", args="", confirm=lambda p: True)
+    assert callable(build_plan)
 
 
 def test_match_args_follow_the_move():

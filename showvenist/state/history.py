@@ -51,23 +51,34 @@ class History:
     ) -> MediaFile:
         """Insert or update `media_file` (first_seen kept, last_seen and last_path refreshed).
         Optional fields keep their stored value when passed as None."""
-        now = _now()
         with self.db.transaction() as c:
-            c.execute(
-                "insert into media_file (fingerprint, content_key, size, last_path, show_slug,"
-                " season_label, disc_label, first_seen, last_seen) values (?,?,?,?,?,?,?,?,?)"
-                " on conflict (fingerprint) do update set size=excluded.size,"
-                " last_path=excluded.last_path, last_seen=excluded.last_seen,"
-                " content_key=coalesce(excluded.content_key, content_key),"
-                " show_slug=coalesce(excluded.show_slug, show_slug),"
-                " season_label=coalesce(excluded.season_label, season_label),"
-                " disc_label=coalesce(excluded.disc_label, disc_label)",
-                (fingerprint, content_key, size, path, show_slug, season_label, disc_label,
-                 now, now),
-            )
-            row = c.execute(
-                "select * from media_file where fingerprint=?", (fingerprint,)
-            ).fetchone()
+            return self.touch_file_in(
+                c, fingerprint, size=size, path=path, content_key=content_key,
+                show_slug=show_slug, season_label=season_label, disc_label=disc_label)
+
+    def touch_file_in(
+        self, c, fingerprint: str, *, size: int, path: str, content_key: str | None = None,
+        show_slug: str | None = None, season_label: str | None = None,
+        disc_label: str | None = None,
+    ) -> MediaFile:
+        """`touch_file` inside the caller's open transaction `c` (the move log writes the file,
+        the match and the op's `done` in one transaction, §13.4)."""
+        now = _now()
+        c.execute(
+            "insert into media_file (fingerprint, content_key, size, last_path, show_slug,"
+            " season_label, disc_label, first_seen, last_seen) values (?,?,?,?,?,?,?,?,?)"
+            " on conflict (fingerprint) do update set size=excluded.size,"
+            " last_path=excluded.last_path, last_seen=excluded.last_seen,"
+            " content_key=coalesce(excluded.content_key, content_key),"
+            " show_slug=coalesce(excluded.show_slug, show_slug),"
+            " season_label=coalesce(excluded.season_label, season_label),"
+            " disc_label=coalesce(excluded.disc_label, disc_label)",
+            (fingerprint, content_key, size, path, show_slug, season_label, disc_label,
+             now, now),
+        )
+        row = c.execute(
+            "select * from media_file where fingerprint=?", (fingerprint,)
+        ).fetchone()
         return _file(row)
 
     def get_file(self, fingerprint: str) -> MediaFile | None:
@@ -105,36 +116,49 @@ class History:
         """Record a confirmed match (episode_id None = confirmed extra). Any other confirmed
         match of the same file and show becomes `rejected` (assign over a confirmed match,
         §4.4); re-confirming the same target just replaces the earlier row."""
+        with self.db.transaction() as c:
+            return self.confirm_in(
+                c, fingerprint, show_slug, episode_id=episode_id, season=season,
+                episode=episode, title=title, source=source, run_id=run_id,
+                confidence=confidence, margin=margin, bundle_revision=bundle_revision)
+
+    def confirm_in(
+        self, c, fingerprint: str, show_slug: str, *, episode_id: str | None,
+        season: int | None, episode: int | None, title: str | None, source: MatchSource,
+        run_id: int | None, confidence: str | None = None, margin: float | None = None,
+        bundle_revision: str | None = None,
+    ) -> Match:
+        """`confirm` inside the caller's open transaction `c` (§13.4: one transaction per
+        move)."""
         if episode_id is None and (season is not None or episode is not None):
             raise ValueError("an extra carries no season or episode")
-        with self.db.transaction() as c:
-            same = c.execute(
-                "select id from match where fingerprint=? and show_slug=? and"
-                " status='confirmed' and episode_id is ?",
-                (fingerprint, show_slug, episode_id),
-            ).fetchone()
-            if same:  # re-confirming the same target refreshes the row, rejects nothing
-                c.execute(
-                    "update match set season=?, episode=?, title=?, source=?, confidence=?,"
-                    " margin=?, bundle_revision=?, run_id=?, created_at=? where id=?",
-                    (season, episode, title, source, confidence, margin, bundle_revision,
-                     run_id, _now(), same[0]),
-                )
-                c.execute(
-                    "update match set status='rejected' where fingerprint=? and show_slug=?"
-                    " and status='confirmed' and id<>?", (fingerprint, show_slug, same[0]))
-                return _match(c.execute(
-                    f"select {_MATCH_COLS} from match where id=?", (same[0],)).fetchone())
+        same = c.execute(
+            "select id from match where fingerprint=? and show_slug=? and"
+            " status='confirmed' and episode_id is ?",
+            (fingerprint, show_slug, episode_id),
+        ).fetchone()
+        if same:  # re-confirming the same target refreshes the row, rejects nothing
+            c.execute(
+                "update match set season=?, episode=?, title=?, source=?, confidence=?,"
+                " margin=?, bundle_revision=?, run_id=?, created_at=? where id=?",
+                (season, episode, title, source, confidence, margin, bundle_revision,
+                 run_id, _now(), same[0]),
+            )
             c.execute(
                 "update match set status='rejected' where fingerprint=? and show_slug=?"
-                " and status='confirmed'",
-                (fingerprint, show_slug),
-            )
-            return self._insert(
-                c, fingerprint, show_slug, episode_id=episode_id, season=season,
-                episode=episode, title=title, status="confirmed", source=source, run_id=run_id,
-                confidence=confidence, margin=margin, bundle_revision=bundle_revision,
-            )
+                " and status='confirmed' and id<>?", (fingerprint, show_slug, same[0]))
+            return _match(c.execute(
+                f"select {_MATCH_COLS} from match where id=?", (same[0],)).fetchone())
+        c.execute(
+            "update match set status='rejected' where fingerprint=? and show_slug=?"
+            " and status='confirmed'",
+            (fingerprint, show_slug),
+        )
+        return self._insert(
+            c, fingerprint, show_slug, episode_id=episode_id, season=season,
+            episode=episode, title=title, status="confirmed", source=source, run_id=run_id,
+            confidence=confidence, margin=margin, bundle_revision=bundle_revision,
+        )
 
     def reject(
         self, fingerprint: str, show_slug: str, *, episode_id: str | None, run_id: int | None,
