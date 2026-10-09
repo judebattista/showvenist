@@ -49,6 +49,10 @@ class FileReport(_M):
     runner_up: Decision | None = None
     signals: list[SignalContribution] = []
     flags: list[str] = []  # duplicate, out_of_scope, possible_two_parter, play_all, not_ready, ...
+    # Duplicates (decision 56): path of the primary copy this file duplicates, and this copy's
+    # 0-based rank among that primary's copies by quality, then path. None for non-duplicates.
+    duplicate_of: str | None = None
+    duplicate_rank: int | None = None
 
 
 class Summary(_M):

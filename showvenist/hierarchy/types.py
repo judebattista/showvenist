@@ -66,6 +66,7 @@ class NamedEpisode:
     season: int
     episode: int
     suffix: str = ""  # 's02e09a' -> 'a': names differing only by suffix form a duplicate set
+    dupe: int | None = None  # X of a `_dupe_X` name (decision 56): a known duplicate copy
 
 
 @dataclass

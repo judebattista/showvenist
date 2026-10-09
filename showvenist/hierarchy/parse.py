@@ -23,6 +23,7 @@ from showvenist.hierarchy.types import (
     SeasonNode,
     ShowNode,
 )
+from showvenist.rename.naming import parse_dupe
 
 _CARDINALS = "one two three four five six seven eight nine ten eleven twelve".split()
 _ORDINALS = (
@@ -124,7 +125,7 @@ def parse_named(name: str, patterns: Sequence[str] | None = None) -> NamedEpisod
         if season is None or episode is None:
             continue
         suffix = _group(m, "suffix", 3, rx.groups) or ""
-        return NamedEpisode(season, episode, suffix.lower())
+        return NamedEpisode(season, episode, suffix.lower(), parse_dupe(name))
     return None
 
 

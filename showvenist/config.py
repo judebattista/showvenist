@@ -28,6 +28,12 @@ class NamingConfig(_Section):
     move_extras: bool = True
 
 
+class HistoryConfig(_Section):
+    """[history]: the soft prior against an episode already confirmed for another file (§11.4)."""
+
+    penalty: float = 2.302585092994046  # ln 10
+
+
 class AnalysisConfig(_Section):
     io_concurrency: int = 1
     ocr_workers: int = 0
@@ -91,6 +97,7 @@ class Config(_Section):
     tmdb: TmdbConfig = Field(default_factory=TmdbConfig)
     opensubtitles: OpenSubtitlesConfig = Field(default_factory=OpenSubtitlesConfig)
     naming: NamingConfig = Field(default_factory=NamingConfig)
+    history: HistoryConfig = Field(default_factory=HistoryConfig)
     analysis: AnalysisConfig = Field(default_factory=AnalysisConfig)
     llm: LlmConfig = Field(default_factory=LlmConfig)
     weights: WeightsConfig = Field(default_factory=WeightsConfig)
