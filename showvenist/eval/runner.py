@@ -57,7 +57,12 @@ from showvenist.assign.blocks import block_confidence, solve_blocks
 from showvenist.assign.confidence import confidence
 from showvenist.bundle.schema import Bundle
 from showvenist.config import Config, HierarchyConfig, WeightsConfig
-from showvenist.eval.harness import compute_metrics, find_ordering, resolve_labels
+from showvenist.eval.harness import (
+    _id_season,
+    compute_metrics,
+    find_ordering,
+    resolve_labels,
+)
 from showvenist.eval.types import (
     EvalResult,
     FileDecision,
@@ -134,12 +139,17 @@ def path_season(path: str) -> int | None:
     return None
 
 
-def _group_season(lab: ResolvedLabel) -> tuple[int | None, str | None]:
+def _group_season(
+    lab: ResolvedLabel, bundles: Mapping[str, Bundle] | None = None
+) -> tuple[int | None, str | None]:
     """(season, mismatch note). Production reads the season from the folder (§11.3), so the
     `Season N` folder wins; the label's season (in its own ordering) is the fallback when the
     path has none. A folder and label that disagree (e.g. chronology labels) get a note."""
     folder = path_season(lab.row.path)
     label = None
+    if lab.kind == "episode" and lab.row.label.strip().startswith("@"):
+        # an episode id (from history): no numbering to disagree with the folder
+        return folder if folder is not None else _id_season(lab, bundles), None
     if lab.kind == "episode":
         m = _LABEL_RE.match(lab.row.label.strip())
         if m:
@@ -371,7 +381,7 @@ def run_eval(
     labels, problems = resolve_labels(manifest_rows, bundles)
     groups: dict[tuple[str, int | None], list[ResolvedLabel]] = defaultdict(list)
     for lab in labels:
-        season, note = _group_season(lab)
+        season, note = _group_season(lab, bundles)
         if note:
             problems.append(Problem(lab.row, note))
         groups[(lab.row.show, season)].append(lab)

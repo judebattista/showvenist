@@ -99,7 +99,9 @@ from showvenist.scoring.types import (
     ScoreResult,
     level_of,
 )
+from showvenist.state.db import Match
 from showvenist.state.fingerprint import fingerprint
+from showvenist.state.history import History
 
 # progress(done, total, path, error): called once per input path after it is handled
 Progress = Callable[[int, int, Path, str | None], None]
@@ -121,6 +123,8 @@ FLAG_DISC_WINDOW_FAILED = "disc_window_failed"  # §10.2
 FLAG_PLAY_ALL = "play_all"  # long file whose windows point to different episodes (§14)
 FLAG_POSSIBLE_TWO_PARTER = "possible_two_parter"  # long as two episodes, both fit (§14)
 FLAG_UNREADABLE = "unreadable"  # could not be read or analyzed: needs review (§4.5)
+FLAG_CONFIRMED = "confirmed"  # decided earlier and read straight from history (§4.3)
+FLAG_HISTORY_DUPLICATE = "history_duplicate"  # its episode is confirmed for another file (§11.4)
 
 
 def ordering_key(bundle: Bundle, name: str) -> str | None:
@@ -253,6 +257,7 @@ class _Named:
     episode_id: str | None  # resolved in the naming order; None = unresolved (see reason)
     reason: str | None = None
     row: bool = False  # True when it is a pinned row of the solve
+    confirmed: bool = False  # read from history, not from the name
 
 
 class Session:
@@ -275,8 +280,14 @@ class Session:
         block_params: BlockParams | None = None,
         marker: Marker | None = None,
         allow_duplicates: bool = False,
+        history: History | None = None,
+        reanalyze: bool = False,
     ):
         self.bundle = bundle
+        # History prior (§11.4) and confirmed files (§4.3); None = off, as eval requires
+        self.history = history
+        self.reanalyze = reanalyze  # ignore confirmed files in history (the prior stays)
+        self.confirmed_extras: dict[Path, FileInfo] = {}  # confirmed extras: not analyzed
         self.allow_duplicates = allow_duplicates  # near duplicates are other versions (§4.3)
         self.bundle_dir = Path(bundle_dir) if bundle_dir is not None else None
         self.config = config
@@ -451,6 +462,7 @@ class Session:
         done = 0
         todo: list[Path] = []
         named_nodes: list[FileNode] = []
+        hist_hits: list[tuple[Path, str, str | None]] = []
         for path in paths:
             node = self._node.get(path)
             fn = node[1] if node is not None else None
@@ -460,6 +472,8 @@ class Session:
                 )
             elif fn is not None and fn.named is not None:
                 named_nodes.append(fn)
+            elif (hit := self._history_hit(path)) is not None:
+                hist_hits.append(hit)
             else:
                 todo.append(path)
                 continue
@@ -468,6 +482,9 @@ class Session:
                 progress(done, total, path, None)
         if named_nodes:
             self._add_named(named_nodes)
+        for path in self._add_confirmed(hist_hits):  # not usable as a pin: analyze it
+            todo.append(path)
+            done -= 1
 
         offset = done
 
@@ -591,6 +608,50 @@ class Session:
             else:
                 held.add(eid)
                 self.named[path] = _Named(info, eid, None, row=True)
+
+    def _history_hit(self, path: Path) -> tuple[Path, str, str | None] | None:
+        """(path, fingerprint, episode id | None for an extra) when history holds a confirmed
+        decision for this file in this show; None otherwise (or with --reanalyze)."""
+        if self.history is None or self.reanalyze or path in self.pins:
+            return None
+        try:
+            fp = fingerprint(path)
+        except OSError:
+            return None
+        mine = [m for m in self.history.confirmed_for_file(fp) if m.show_slug == self.show_slug]
+        if not mine:
+            return None
+        if any(m.episode_id is None for m in mine):
+            return path, fp, None
+        return path, fp, mine[-1].episode_id
+
+    def _add_confirmed(self, hits: list[tuple[Path, str, str | None]]) -> list[Path]:
+        """Files decided earlier: extras are reported as such, episodes become pinned rows.
+        Returns the paths that can't be pinned (episode out of scope or already held), which
+        are analyzed after all."""
+        in_scope = {c.id for c in self.candidates}
+        held = {n.episode_id for n in self.named.values() if n.row}
+        back: list[Path] = []
+        for path, fp, eid in hits:
+            info = FileInfo(path=path, fingerprint=fp, duration_s=0.0,
+                            disc=self._disc_name(path))
+            if eid is None:
+                self.confirmed_extras[path] = info
+            elif eid in in_scope and eid not in held:
+                held.add(eid)
+                self.named[path] = _Named(info, eid, None, row=True, confirmed=True)
+            else:
+                back.append(path)
+        return back
+
+    def _history_penalty(self, cands: list[Candidate]) -> np.ndarray | None:
+        if self.history is None or not self.files:
+            return None
+        m = np.asarray(self.history.history_penalty(
+            self.show_slug, [f.fingerprint for f in self.files], [c.id for c in cands],
+            self.config.history.penalty,
+        ), dtype=float)
+        return m if m.any() else None
 
     def _evidence_changed(self, reset_llm: bool = False) -> None:
         """New analysis (reset_llm): everything goes. New LLM evidence: the base scorers'
@@ -737,8 +798,9 @@ class Session:
         if ev.fused is None:
             res = self._results(ordering)
             F, E = len(self.files), len(ev.candidates)
+            hp = self._history_penalty(ev.candidates)
             if res:
-                f = fuse(res, self.config.weights)
+                f = fuse(res, self.config.weights, history_penalty=hp)
             else:  # no scorers: prior only
                 f = fuse({}, self.config.weights, history_penalty=np.zeros((F, E)))
             N = len(self.named_rows)
@@ -1105,7 +1167,9 @@ class Session:
         sol = self.solution
         out: list[str] = []
         if i >= len(self.files):
-            return [FLAG_NAMED]
+            k = i - len(self.files)
+            rows = self.named_rows
+            return [FLAG_CONFIRMED if k < len(rows) and rows[k].confirmed else FLAG_NAMED]
         f = self.files[i]
         if f.dialogue is None or f.dialogue.track is None:
             out.append(FLAG_NO_DIALOGUE)
@@ -1121,6 +1185,38 @@ class Session:
                 out.append(FLAG_PLAY_ALL)
             if possible_two_parter(i, col, f.duration_s, sol.candidates, sol.fused):
                 out.append(FLAG_POSSIBLE_TWO_PARTER)
+            if i in self._history_dups(sol):
+                out.append(FLAG_HISTORY_DUPLICATE)
+        return out
+
+    def _history_dups(self, sol: Solution) -> dict[int, tuple[str, Match]]:
+        """Row -> (episode label, a match) for rows whose chosen episode is already confirmed
+        for a different fingerprint (§11.4 duplicate warning)."""
+        out: dict[int, tuple[str, Match]] = {}
+        if self.history is None:
+            return out
+        for i, f in enumerate(sol.files[: len(self.files)]):
+            col = sol.assignment.column[i]
+            if col < 0 or i in sol.pins:
+                continue
+            cand = sol.candidates[col]
+            other = [m for m in self.history.confirmed_for_episode(self.show_slug, cand.id)
+                     if m.fingerprint != f.fingerprint]
+            if other:
+                out[i] = (cand.label, other[-1])
+        return out
+
+    def _history_notices(self, sol: Solution | None) -> list[str]:
+        out = []
+        if sol is None or self.history is None:
+            return out
+        for i, (label, m) in self._history_dups(sol).items():
+            mf = self.history.get_file(m.fingerprint)
+            where = mf.last_path if mf is not None else "a file no longer known"
+            out.append(
+                f"{sol.files[i].path.name}: {label} is already confirmed for {where} "
+                "(duplicate, or a re-rip to review)"
+            )
         return out
 
     def report(self, solution: Solution | None = None) -> Report:
@@ -1241,6 +1337,10 @@ class Session:
             )
             for path in self.errors
         ]
+        extra_rows += [
+            self._plain_row(info, "extra", None, [FLAG_CONFIRMED], high=True)
+            for info in self.confirmed_extras.values()
+        ]
         all_rows = [*rep.files, *extra_rows]
         all_rows.sort(key=lambda r: (r.disc is None, r.disc or "", r.path))
         return rep.model_copy(
@@ -1267,6 +1367,7 @@ class Session:
                 "outside this season; it was not moved there (pin it to change season)"
             )
         out += self._near_notices(sol)
+        out += self._history_notices(sol)
         waiting: dict[str, int] = {}
         for info in self.not_ready.values():
             key = info.disc or "(no disc)"
@@ -1313,9 +1414,11 @@ class Session:
 
 
 __all__ = [
+    "FLAG_CONFIRMED",
     "FLAG_DISC_WINDOW_FAILED",
     "FLAG_DUPLICATE",
     "FLAG_DUPLICATE_ALLOWED",
+    "FLAG_HISTORY_DUPLICATE",
     "FLAG_NAMED",
     "FLAG_NEAR_DUPLICATE",
     "FLAG_NOT_READY",

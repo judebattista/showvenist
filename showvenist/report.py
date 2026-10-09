@@ -30,7 +30,7 @@ from showvenist.scoring.types import (
     Fused,
 )
 
-CONFIRMED_FLAGS = {"already_confirmed", "already confirmed"}
+CONFIRMED_FLAGS = {"already_confirmed", "already confirmed", "confirmed"}
 NOT_READY_FLAG = "not_ready"
 ODDS_CAP = 999
 

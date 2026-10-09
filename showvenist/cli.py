@@ -601,6 +601,9 @@ def identify(
     yes: bool = typer.Option(
         False, "--yes", help="Allow the paid LLM calls whose estimated cost is printed"
     ),
+    reanalyze: bool = typer.Option(
+        False, "--reanalyze", help="Ignore files already confirmed in history (analyze them again)"
+    ),
     as_report: bool = typer.Option(
         False, "--report", help="Print the report (the default: no review TUI yet)"
     ),
@@ -625,6 +628,8 @@ def identify(
     from showvenist.hierarchy.parse import is_duplicate_disc_problem
     from showvenist.report import exit_code, render_tables, to_json
     from showvenist.session import Session
+    from showvenist.state.db import StateDb, state_db_path
+    from showvenist.state.history import History
 
     if as_report and as_json:
         _fail("--report and --json are exclusive")
@@ -725,6 +730,10 @@ def identify(
     if show_dir is not None and jellyfin_hint(show_dir.name) is None and bundle.show.ids.tmdb:
         folder_hint = suggest_folder_name(bundle.show.title, bundle.show.year,
                                           bundle.show.ids.tmdb)
+    hist, hist_db = None, None
+    if state_db_path().exists():  # report mode never creates or writes state.db
+        hist_db = StateDb.open_default()
+        hist = History(hist_db)
     reports = []
     for snode, num in jobs:
         sub = replace(tree, seasons=[snode])
@@ -733,7 +742,7 @@ def identify(
                 bundle, bundle_path(slug, root), cfg, ordering=order, season=num,
                 episodes=wanted, include_specials=include_specials or num == 0, cache=cache,
                 scorers=_scorers(sig), tree=sub, use_blocks=not no_blocks, marker=marker,
-                allow_duplicates=allow_duplicates,
+                allow_duplicates=allow_duplicates, history=hist, reanalyze=reanalyze,
             )
         except (ValueError, KeyError) as e:
             _fail(f"identify: {e}")
@@ -796,6 +805,8 @@ def identify(
             )
         reports.append(report)
 
+    if hist_db is not None:
+        hist_db.close()
     done = reports
     if as_json:
         if len(done) == 1:
@@ -842,9 +853,199 @@ def _offer_marker(show_dir: Path, slug: str, bundle, order: str) -> Path | None:
         return None
 
 
+def _state_file(file: Path) -> tuple[str, int]:
+    from showvenist.state.fingerprint import fingerprint
+
+    try:
+        return fingerprint(file), file.stat().st_size
+    except OSError as e:
+        _fail(f"cannot read {file}: {e}")
+
+
+@app.command()
+def assign(
+    file: Path = typer.Argument(..., exists=True, dir_okay=False, help="Media file"),
+    episode: str | None = typer.Argument(None, help="Episode, e.g. S02E05"),
+    show: str | None = typer.Option(
+        None, "--show", help="Bundle slug or show title (default: the show folder's marker file)"),
+    order: str | None = typer.Option(
+        None, "--order", help="Ordering the episode is written in (default: the show's "
+        "naming_order)"),
+    extra: bool = typer.Option(False, "--extra", help="Record the file as a confirmed extra"),
+    yes: bool = typer.Option(False, "--yes", help="Do not ask before writing"),
+    root: Path | None = typer.Option(None, "-o", help="Bundle root directory"),
+) -> None:
+    """Record a confirmed match by hand (source manual). Never moves or renames a file."""
+    from showvenist.config import bundles_dir, load_config
+    from showvenist.eval.harness import resolve_labels
+    from showvenist.eval.types import ManifestRow
+    from showvenist.hierarchy.marker import ShowResolutionError, read_marker, resolve_show
+    from showvenist.state.db import StateDb
+    from showvenist.state.history import History
+
+    if extra == (episode is not None):
+        _fail("assign: give an episode (S02E05) or --extra, not both and not neither")
+    hcfg = load_config().hierarchy
+    show_dir = _show_dir(file.resolve(), hcfg)
+    try:
+        marker = read_marker(show_dir)
+    except ValueError as e:
+        _fail(f"assign: {e}")
+    if show is None:
+        try:
+            slug = resolve_show(show_dir, root or bundles_dir(), interactive=False).slug
+        except (ShowResolutionError, ValueError) as e:
+            _fail(f"assign: {e}; pass --show")
+        _, bundle = _resolve_bundle(slug, root)
+    else:
+        slug, bundle = _resolve_bundle(show, root)
+    if marker is not None and marker.bundle and marker.bundle != slug:
+        marker = None
+    ordering = order or (marker.naming_order if marker is not None else "aired")
+    okey = _ordering_key(bundle, ordering)
+    if okey is None:
+        _fail(f"assign: unknown ordering {ordering!r} (the bundle has: "
+              f"{', '.join(sorted(bundle.orderings))})")
+    eid = season = number = title = None
+    what = "a confirmed extra"
+    if not extra:
+        labels, problems = resolve_labels(
+            [ManifestRow(str(file), slug, episode or "", okey)], {slug: bundle})
+        if problems or not labels or labels[0].kind != "episode":
+            _fail(f"assign: {problems[0].reason if problems else f'cannot read {episode!r}'}")
+        eid = labels[0].episode_id
+        ent = next(e for e in bundle.orderings[okey].entries if e.episode_id == eid)
+        season, number = ent.season, ent.episode
+        title = bundle.episode_by_id()[eid].title
+        what = f"S{season:02d}E{number:02d} {title!r}"
+    fp, size = _state_file(file)
+    abs_path = str(file.resolve())
+    with StateDb.open_default() as db:
+        hist = History(db)
+        typer.echo(f"{file.name}: {what} in {slug} (ordering {okey}), source manual")
+        for m in hist.confirmed_for_file(fp):
+            if m.show_slug == slug and m.episode_id != eid:
+                was = ("extra" if m.episode_id is None
+                       else f"S{m.season:02d}E{m.episode:02d}")
+                typer.echo(f"  its confirmed match {was} will become rejected")
+        if eid is not None:
+            for m in hist.confirmed_for_episode(slug, eid):
+                other = hist.get_file(m.fingerprint)
+                if m.fingerprint != fp:
+                    typer.echo(f"  note: already confirmed for "
+                               f"{other.last_path if other else m.fingerprint}")
+        if not yes and not typer.confirm("Record this?", default=False):
+            typer.echo("Nothing written.")
+            raise typer.Exit(1)
+        hist.touch_file(fp, size=size, path=abs_path, show_slug=slug)
+        run = hist.begin_run("assign", f"{abs_path} {'--extra' if extra else episode}")
+        hist.confirm(fp, slug, episode_id=eid, season=season, episode=number, title=title,
+                     source="manual", run_id=run.id)
+    typer.echo(f"Recorded (run {run.id}). Nothing was moved or renamed.")
+
+
+@app.command("history")
+def history_cmd(
+    show: str | None = typer.Option(
+        None, "--show", help="Bundle slug or show title (default: every show in history)"),
+    season: int | None = typer.Option(None, "--season", help="One season of the ordering"),
+    order: str | None = typer.Option(None, "--order", help="Ordering to list in"),
+    root: Path | None = typer.Option(None, "-o", help="Bundle root directory"),
+) -> None:
+    """Per season: confirmed episodes with their files, missing episodes, confirmed extras."""
+    from showvenist.state.db import StateDb
+    from showvenist.state.history import History
+
+    with StateDb.open_default() as db:
+        hist = History(db)
+        slugs = [_resolve_bundle(show, root)[0]] if show else hist.shows()
+        if not slugs:
+            typer.echo("History is empty.")
+            return
+        for slug in slugs:
+            _, bundle = _resolve_bundle(slug, root)
+            _print_history(hist, slug, bundle, season, order)
+
+
+def _print_history(hist, slug: str, bundle, season: int | None, order: str | None) -> None:
+    name = order or "aired"
+    okey = _ordering_key(bundle, name)
+    if okey is None:
+        _fail(f"history: unknown ordering {name!r} for {slug}")
+    entries = bundle.orderings[okey].entries
+    by_ep = bundle.episode_by_id()
+    got: dict[str, list[str]] = {}
+    extras: list[str] = []
+    for m in hist.confirmed(slug):
+        f = hist.get_file(m.fingerprint)
+        path = f.last_path if f else m.fingerprint
+        if m.episode_id is None:
+            extras.append(path)
+        else:
+            got.setdefault(m.episode_id, []).append(path)
+    typer.echo(f"{slug} (ordering {okey})")
+    seasons = sorted({e.season for e in entries if season is None or e.season == season})
+    for sn in seasons:
+        mine = [e for e in entries if e.season == sn]
+        have = [e for e in mine if e.episode_id in got]
+        miss = [e for e in mine if e.episode_id not in got]
+        typer.echo(f"  Season {sn}: {len(have)} of {len(mine)} confirmed")
+        for e in have:
+            for path in got[e.episode_id]:
+                typer.echo(f"    S{e.season:02d}E{e.episode:02d} {by_ep[e.episode_id].title}"
+                           f"  {path}")
+        if miss:
+            typer.echo("    missing: " + ", ".join(f"E{e.episode:02d}" for e in miss))
+    if season is None:
+        if extras:
+            typer.echo(f"  Confirmed extras ({len(extras)})")
+            for path in extras:
+                typer.echo(f"    {path}")
+        undone = hist.undone(slug)
+        if undone:
+            typer.echo(f"  Undone (not counted): {len(undone)}")
+
+
+@app.command()
+def forget(
+    target: str = typer.Argument(..., help="A file path or a fingerprint"),
+    yes: bool = typer.Option(False, "--yes", help="Do not ask before removing"),
+) -> None:
+    """Remove every record of a file from state.db (its matches; the file is not touched)."""
+    from showvenist.state.db import StateDb
+    from showvenist.state.history import History
+
+    p = Path(target)
+    fp = _state_file(p)[0] if p.is_file() else target
+    with StateDb.open_default() as db:
+        hist = History(db)
+        f = hist.get_file(fp)
+        matches = hist.matches_for_file(fp)
+        if f is None and not matches:
+            _fail(f"forget: no record of {target}")
+        typer.echo(f"{fp}" + (f"  {f.last_path}" if f else ""))
+        for m in matches:
+            what = "extra" if m.episode_id is None else f"S{m.season:02d}E{m.episode:02d}"
+            typer.echo(f"  {m.status} {what} ({m.source}, {m.show_slug})")
+        typer.echo(f"Would remove the file record and {len(matches)} match(es); the move log "
+                   "keeps its text.")
+        if not yes and not typer.confirm("Forget this file?", default=False):
+            typer.echo("Nothing removed.")
+            raise typer.Exit(1)
+        hist.forget(fp)
+    typer.echo("Forgotten.")
+
+
 @app.command("eval")
 def eval_cmd(
-    manifest: Path = typer.Argument(..., exists=True, dir_okay=False),
+    manifest: Path | None = typer.Argument(None, exists=True, dir_okay=False),
+    from_history: bool = typer.Option(
+        False, "--from-history",
+        help="Labels from state.db instead of a manifest: confirmed matches are positive "
+        "labels, rejected matches negative ones",
+    ),
+    show: str | None = typer.Option(
+        None, "--show", help="Limit to one show (bundle slug or title)"),
     root: Path | None = typer.Option(None, "-o", help="Bundle root directory"),
     library: Path | None = typer.Option(
         None, "--library", help="Prefix for relative manifest paths (read-only library root)"
@@ -919,8 +1120,27 @@ def eval_cmd(
     cfg = load_config()
     sig = _parse_signals(signals)
     mode = _llm_mode(llm, cfg, sig)
-    rows = read_manifest(manifest)
-    if library is not None:
+    if (manifest is None) == (not from_history):
+        _fail("eval: give a manifest CSV or --from-history, not both and not neither")
+    hl = None
+    if from_history:
+        from showvenist.eval.history import history_labels
+        from showvenist.state.db import StateDb
+        from showvenist.state.history import History
+
+        slug_only = _resolve_bundle(show, root)[0] if show else None
+        with StateDb.open_default() as hdb:
+            hl = history_labels(History(hdb), [slug_only] if slug_only else None)
+        rows = hl.rows
+        if not rows:
+            _fail("eval: history has no confirmed matches with files on disk"
+                  + (f" for {slug_only}" if slug_only else ""))
+    else:
+        rows = read_manifest(manifest)
+        if show:
+            slug_only = _resolve_bundle(show, root)[0]
+            rows = [r for r in rows if r.show == slug_only]
+    if library is not None and not from_history:
         rows = [ManifestRow(str(library / r.path), r.show, r.label, r.order, r.disc) for r in rows]
     slugs = sorted({r.show for r in rows})
     bundles, dirs = {}, {}
@@ -960,6 +1180,8 @@ def eval_cmd(
         scorers=_scorers(sig), llm_mode=mode, llm_factory=llm_factory, approve=approve,
         use_blocks=not no_blocks, starting_order=start_order,
     )
+    if hl is not None:
+        result.problems += hl.problems
     if compare_blocks:
         # the second run re-reads the analysis cache the first one just filled
         typer.echo("comparison run without blocks", err=True)
@@ -971,6 +1193,10 @@ def eval_cmd(
         typer.echo(format_compare_blocks(result, plain, {g.key: g.n_discs for g in groups}))
     else:
         typer.echo(format_eval(result))
+    if hl is not None:
+        from showvenist.eval.history import negative_line
+
+        typer.echo(negative_line(hl.negatives, all_decisions))
     typer.echo(f"\nstarting order: {start_order}"
                + (" (the labels' ordering: detection is handed the answer)"
                   if start_order == "labels" else ""))

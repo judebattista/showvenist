@@ -65,6 +65,15 @@ def _resolve_episode(row: ManifestRow, bundle: Bundle) -> tuple[str | None, int 
     return eid, season, ""
 
 
+def _resolve_id(row: ManifestRow, bundle: Bundle) -> tuple[str | None, str]:
+    """A label that names the episode directly (`@tmdb:123`, written from history, which keeps
+    ids but not the ordering name): (episode id, problem reason)."""
+    eid = row.label.strip()[1:]
+    if eid not in bundle.episode_by_id():
+        return None, f"{row.label} is not an episode of the bundle"
+    return eid, ""
+
+
 def _split_multi(label: str) -> list[str] | None:
     """'S01E01+S01E02' or 'S01E01+E02' -> ['S01E01', 'S01E02']; None for a single label."""
     parts = [x.strip() for x in label.split("+")]
@@ -115,6 +124,12 @@ def resolve_labels(
             resolved.append(ResolvedLabel(row, "extra", multi=True))
         elif label == "episode?":
             resolved.append(ResolvedLabel(row, "episode?"))
+        elif row.label.strip().startswith("@"):
+            eid, reason = _resolve_id(row, bundle)
+            if reason:
+                problems.append(Problem(row, reason))
+            else:
+                resolved.append(ResolvedLabel(row, "episode", episode_id=eid))
         elif (parts := _split_multi(row.label.strip())) is not None:
             ids, _, reason = _resolve_multi(row, bundle, parts)
             if reason:
@@ -243,8 +258,23 @@ def _path_season(path: str) -> int | None:
     return None
 
 
+def _id_season(label: ResolvedLabel, bundles: Mapping[str, Bundle] | None) -> int | None:
+    """Season of an `@id` label: its entry in the row's ordering, else in any ordering."""
+    bundle = (bundles or {}).get(label.row.show)
+    if bundle is None:
+        return None
+    first = find_ordering(bundle, label.row.order)
+    for o in ([first] if first else []) + list(bundle.orderings.values()):
+        for ent in o.entries:
+            if ent.episode_id == label.episode_id:
+                return ent.season
+    return None
+
+
 def _season(label: ResolvedLabel, bundles: Mapping[str, Bundle] | None) -> int | None:
     """Season of an episode label from its ordering entry; else from a `Season N` folder."""
+    if label.kind == "episode" and label.row.label.strip().startswith("@"):
+        return _path_season(label.row.path) or _id_season(label, bundles)
     if label.kind == "episode" and bundles and label.row.show in bundles:
         first = (_split_multi(label.row.label.strip()) or [label.row.label.strip()])[0]
         _, season, reason = _resolve_episode(

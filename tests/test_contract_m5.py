@@ -78,12 +78,10 @@ def test_rename_op_vocabulary():
             d.conn.execute(ins, (bad[0], "/a", "/b", bad[1]))
 
 
-def test_history_api_is_a_stub_until_sv_o4f_2():
+def test_history_api_is_implemented():
     h = History(db())
-    with pytest.raises(NotImplementedError):
-        h.begin_run("apply", "")
-    with pytest.raises(NotImplementedError):
-        h.highest_dupe_index("s", "tmdb:1")
+    assert h.begin_run("apply", "").id == 1
+    assert h.highest_dupe_index("s", "tmdb:1") == 0
 
 
 def test_rename_functions_are_stubs_until_sv_o4f_3(tmp_path):
