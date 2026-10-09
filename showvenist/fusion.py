@@ -80,6 +80,7 @@ def fuse(
     prior = log_prior(n_cands, pi_x) if n_cands > 0 else 0.0
     S = np.full((n_files, n_cands), prior, dtype=float)
     contributions: dict[str, np.ndarray] = {}
+    availability: dict[str, np.ndarray] = {}
 
     names = {n for r in REGIME_SCORERS.values() for n in r}
     for name in sorted(names):
@@ -98,6 +99,7 @@ def fuse(
             # guard against a negative weight too: for-only evidence never lowers S
             contrib = np.maximum(contrib, 0.0)
         contributions[name] = contrib
+        availability[name] = avail.copy()
         S += contrib
 
     if history_penalty is not None:
@@ -107,4 +109,6 @@ def fuse(
         contributions["history"] = -hp
         S -= hp
 
-    return Fused(S=S, contributions=contributions, regimes=regimes, log_prior=prior)
+    return Fused(
+        S=S, contributions=contributions, regimes=regimes, log_prior=prior, available=availability
+    )

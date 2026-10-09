@@ -63,6 +63,7 @@ from showvenist.assign.types import BlockParams, DiscSpec, OrderingChoice
 from showvenist.bundle.schema import Bundle, lang_codes
 from showvenist.bundle.store import slugify
 from showvenist.config import Config
+from showvenist.edgeflags import play_all, possible_two_parter
 from showvenist.fusion import fuse
 from showvenist.hierarchy.marker import _find_ordering, named_episodes
 from showvenist.hierarchy.types import DiscNode, FileNode, Marker, SeasonNode, ShowNode
@@ -117,6 +118,8 @@ FLAG_NOT_READY = "not_ready"  # still being written (§5.2): not analyzed
 FLAG_NAMED = "named"  # name already parses as an episode (§5.5): ground truth, never renamed
 FLAG_OUT_OF_SCOPE = "out_of_scope"  # evidence points to another season (§11.3)
 FLAG_DISC_WINDOW_FAILED = "disc_window_failed"  # §10.2
+FLAG_PLAY_ALL = "play_all"  # long file whose windows point to different episodes (§14)
+FLAG_POSSIBLE_TWO_PARTER = "possible_two_parter"  # long as two episodes, both fit (§14)
 FLAG_UNREADABLE = "unreadable"  # could not be read or analyzed: needs review (§4.5)
 
 
@@ -746,6 +749,8 @@ class Session:
                     contributions={k: np.vstack([v, pad]) for k, v in f.contributions.items()},
                     regimes=[*f.regimes, *(["base"] * N)],
                     log_prior=f.log_prior,
+                    available={k: np.concatenate([v, np.zeros(N, bool)])
+                               for k, v in f.available.items()},
                 )
             ev.fused = f
         return ev.fused
@@ -1110,6 +1115,12 @@ class Session:
             out.append(FLAG_OUT_OF_SCOPE)
         if i in self._window_failed:
             out.append(FLAG_DISC_WINDOW_FAILED)
+        if sol is not None and i < len(sol.files) and i not in sol.pins:
+            col = sol.assignment.column[i]
+            if play_all(i, f.duration_s, sol.candidates, sol.results):
+                out.append(FLAG_PLAY_ALL)
+            if possible_two_parter(i, col, f.duration_s, sol.candidates, sol.fused):
+                out.append(FLAG_POSSIBLE_TWO_PARTER)
         return out
 
     def report(self, solution: Solution | None = None) -> Report:
@@ -1156,6 +1167,7 @@ class Session:
             contributions={k: v[idx] for k, v in sol.fused.contributions.items()},
             regimes=[sol.fused.regimes[r] for r in rows],
             log_prior=sol.fused.log_prior,
+            available={k: v[idx] for k, v in sol.fused.available.items()},
         )
         assignment = Assignment([sol.assignment.column[r] for r in rows], sol.assignment.total)
         confs = [sol.confidences[r] for r in rows]
@@ -1308,6 +1320,8 @@ __all__ = [
     "FLAG_NEAR_DUPLICATE",
     "FLAG_NOT_READY",
     "FLAG_NO_DIALOGUE",
+    "FLAG_PLAY_ALL",
+    "FLAG_POSSIBLE_TWO_PARTER",
     "FLAG_OUT_OF_SCOPE",
     "FLAG_PINNED",
     "FLAG_UNREADABLE",

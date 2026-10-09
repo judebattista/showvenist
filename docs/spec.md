@@ -970,6 +970,8 @@ On startup, leftover `planned` rows are checked against which path actually exis
 | No usable subtitle track at all | Dialogue scorers unavailable; v3 speech-to-text fills the gap; until then such files go to review |
 | Dialogue-free sampled windows | Windows extend until a line count is reached; fully silent files escalate to a full read |
 
+**Play-all and two-part flags (advisory, report only).** `play_all` needs two sampled windows whose reference-subtitle scores each beat their runner-up by more than 2.3 nats and point at different episodes (long file: ≥ 1.8 × the median runtime); `possible_two_parter` uses the duration scorer's double-length rule plus positive dialogue evidence for both episodes. Both are untuned constants. Without reference subtitles `play_all` stays silent: on the library's 11 labeled play-alls, synopsis plus guest window scores flagged at most 2 (at the loosest margin) and one long episode too. Those files are decided as extras by duration and the extras prior instead (11 of 12), so no flag is needed to keep them out of the solve.
+
 ---
 
 ## 15. Architecture, dependencies, packaging

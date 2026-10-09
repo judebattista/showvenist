@@ -151,6 +151,9 @@ class Fused:
     contributions: dict[str, np.ndarray]  # weighted+clamped (F, E) per scorer actually summed
     regimes: list[Regime]  # per file
     log_prior: float
+    # scorer -> (F,) bool: the scorer's own ScoreResult.available for each file (report only);
+    # empty when unknown, then the report falls back to "non-zero contribution"
+    available: dict[str, np.ndarray] = field(default_factory=dict)
 
 
 @dataclass

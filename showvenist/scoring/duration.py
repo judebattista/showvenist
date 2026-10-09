@@ -46,6 +46,30 @@ def calibrate_scale(durations_min: list[float], median_runtime: float) -> tuple[
     return (k if abs(k - 1) >= K_MIN_DEVIATION else None), True
 
 
+DOUBLE_TOLERANCE_MIN = DOUBLE_SIGMA_MIN  # a file is 'about' two runtimes within one such sigma
+
+
+def known_median(runtimes: list[int | None]) -> float | None:
+    """Median of the known runtimes (minutes), or None when no candidate has one."""
+    known = [float(r) for r in runtimes if r]
+    return float(statistics.median(known)) if known else None
+
+
+def double_length_starts(duration_s: float, runtimes: list[int | None]) -> list[int]:
+    """Columns j whose runtime plus the next episode's (unknown runtimes = the median, as in
+    the scorer) is within DOUBLE_TOLERANCE_MIN of the file duration at 1.0x or PAL speed."""
+    median = known_median(runtimes)
+    if median is None:
+        return []
+    rts = [float(r) if r else median for r in runtimes]
+    d = duration_s / 60.0
+    return [
+        j
+        for j in range(len(rts) - 1)
+        if any(abs(d - sc * (rts[j] + rts[j + 1])) <= DOUBLE_TOLERANCE_MIN for sc in SPEED_FACTORS)
+    ]
+
+
 class DurationScorer:
     name = "duration"
     can_be_negative = True

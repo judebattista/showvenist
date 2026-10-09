@@ -69,9 +69,10 @@ def _signals(
 ) -> list[SignalContribution]:
     """Per-signal contributions for the winner and runner-up (extras contribute 0.0).
 
-    Only scorers summed in the file's regime are listed. `available` is a simplification:
-    true iff the scorer's contribution is non-zero for the winner or the runner-up (the fused
-    arrays carry no separate availability bit, and a missing observation is exactly 0).
+    Only scorers summed in the file's regime are listed. `available` is the scorer's own
+    availability for the file (`ScoreResult.available`, carried in `fused.available`): an
+    available scorer that contributes exactly 0 is still available. Without that bit (a
+    hand-built Fused) it falls back to "non-zero for the winner or the runner-up".
     """
     out = []
     for name in REGIME_SCORERS[regime]:  # type: ignore[index]
@@ -82,10 +83,11 @@ def _signals(
         r = None
         if runner_known:
             r = float(arr[i, runner]) if runner is not None and runner >= 0 else 0.0
+        av = fused.available.get(name)
         out.append(
             SignalContribution(
                 name=name,
-                available=bool(w != 0.0 or (r or 0.0) != 0.0),
+                available=bool(av[i]) if av is not None else bool(w != 0.0 or (r or 0.0) != 0.0),
                 winner=w,
                 runner_up=r,
             )
