@@ -182,7 +182,7 @@ showvenist identify PATHS... [--show NAME | --ref DIR] [--season N]
 - `--reanalyze`: ignore history and the analysis cache for these files.
 - On a TTY, `identify` opens the **review TUI** (§12). With `--report` or `--json`, or when stdout isn't a TTY, it prints results and **never touches media files**. It writes nothing to `state.db` (§7.2), updates the analysis cache, and with `--show` may ingest a missing bundle.
 - Files already confirmed in history are reported straight from it, without re-analysis.
-- `--plan` prints the exact move list (old path → new path, flags, reason) and writes nothing; it is the default without a TTY when moves are possible. `--apply` prints the same plan and moves files after you type `yes`; without a TTY it refuses unless `--yes` is also given, so a script or pipe cannot move files by accident. Both use the same plan and apply functions as the TUI (§12), and the rules in §13 decide what is in a plan. Decision 58.
+- `--plan` prints the exact move list (old path → new path, flags, reason) and writes nothing (the plain non-TTY report is unchanged and has no plan). `--apply` prints the same plan and moves files after you type `yes`; without a TTY it refuses unless `--yes` is also given, so a script or pipe cannot move files by accident. Both use the same plan and apply functions as the TUI (§12), and the rules in §13 decide what is in a plan. Decision 58.
 
 ### 4.4 Other commands
 
