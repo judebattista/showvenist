@@ -38,7 +38,9 @@ Pass `on_group=` to receive a `GroupRun` per solved group, then call
 
 from __future__ import annotations
 
+import hashlib
 import os
+import random
 import re
 import time
 from collections import Counter, defaultdict
@@ -333,6 +335,7 @@ def run_eval(
     use_blocks: bool = True,
     tag_of: Callable[[Path], str | None] | None = None,
     starting_order: str | None = None,
+    shuffle_seed: int | None = 0,
 ) -> tuple[list[FileDecision], EvalResult]:
     """Analyze, score and solve every labeled file, then compute the §16.1 metrics.
 
@@ -356,6 +359,12 @@ def run_eval(
 
     Blocks: every group gets a disc tree (`group_tree`); `use_blocks=False` solves without
     the block model. `tag_of(path)` reads the MKV title tag (default: the cached probe).
+
+    File order: when the evidence ties, the assignment falls back to file order, and labeled files
+    are usually listed in episode order, which would hand the solver the answer. Each group's files
+    are therefore sorted by path and shuffled with a seed derived from (`shuffle_seed`, show,
+    season), so the result depends neither on the manifest's row order nor on episode order.
+    `shuffle_seed=None` keeps the manifest order (for tests that need it).
     """
     if llm_mode not in ("off", "auto", "all"):
         raise ValueError(f"unknown LLM mode {llm_mode!r} (off, auto, all)")
@@ -371,6 +380,12 @@ def run_eval(
         if season is None and show in seasoned:
             for lab in groups.pop((show, None)):
                 problems.append(Problem(lab.row, "no season: no `Season N` folder in its path"))
+
+    if shuffle_seed is not None:
+        for key, labs in groups.items():
+            digest = hashlib.blake2b(f"{shuffle_seed}|{key[0]}|{key[1]}".encode(), digest_size=8)
+            labs.sort(key=lambda lab: lab.row.path)
+            random.Random(int.from_bytes(digest.digest(), "big")).shuffle(labs)
 
     total = sum(len(v) for v in groups.values())
     done = 0

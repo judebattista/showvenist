@@ -83,7 +83,7 @@ def test_run_eval_two_seasons(corpus, tmp_path):
     assert [(g.season, g.ordering) for g in groups] == [(1, "aired"), (2, "aired")]
     table = evidence_table(groups[1].solution, groups[1].labels)
     assert len(table) == 3  # the duplicate is not a separate row
-    r0 = table[0]
+    r0 = next(r for r in table if r.target == 1)  # S02E02: its primary copy depends on the shuffle
     assert r0.candidates == ["tmdb:200", "tmdb:201", "tmdb:202", "tmdb:203"]
     assert set(r0.llr) == {
         "duration", "title", "titlecard", "refsubs", "synopsis", "guests", "cues"}
@@ -93,7 +93,8 @@ def test_run_eval_two_seasons(corpus, tmp_path):
     unknown = next(r for r in table if r.label_kind == "episode?")
     assert unknown.target is None and unknown.target_set == [0, 2]
     s1 = evidence_table(groups[0].solution, groups[0].labels)
-    assert [r.target for r in s1] == [2, 0, -1]
+    assert {r.path.rsplit("/", 1)[1]: r.target for r in s1} == {
+        "t00.mkv": 2, "t01.mkv": 0, "t02.mkv": -1}
 
 
 def test_run_eval_ablation_and_whole_show_group(corpus, tmp_path):
@@ -332,3 +333,23 @@ def test_eval_caveats_quiet_with_season_folders_and_extras(corpus, tmp_path):
     run_eval(rows, bundles, Config(), bdirs, None, on_group=groups.append,
              scorers=[DurationScorer()])
     assert all(g.season_from_label == 0 for g in groups) and eval_caveats(groups) == []
+
+
+def test_file_order_is_shuffled_and_independent_of_row_order(corpus, tmp_path):
+    rows, bundles, bdirs, _ = corpus
+
+    def run(rs, **kw):
+        orders = {}
+        decs, _ = run_eval(
+            rs, bundles, Config(), bdirs, AnalysisCache(tmp_path / f"{len(orders)}-{id(rs)}.db"),
+            on_group=lambda g: orders.__setitem__(g.key, [f.path.name for f in g.session.files]),
+            **kw)
+        return orders, {d.path: (d.kind, d.episode_id, d.level) for d in decs}
+
+    a_orders, a_dec = run(rows)
+    b_orders, b_dec = run(list(reversed(rows)))
+    assert a_orders == b_orders and a_dec == b_dec  # row order is irrelevant
+    n_orders, _ = run(rows, shuffle_seed=None)
+    c_orders, _ = run(rows, shuffle_seed=1)
+    assert c_orders != a_orders  # the seed changes the order
+    assert n_orders != a_orders or all(len(v) < 3 for v in n_orders.values())
