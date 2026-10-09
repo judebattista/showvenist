@@ -2,8 +2,9 @@
 
 For each file with `card_reads` not None: apply `cfg.pattern` to each read's text, normalize the
 `ref` group per `cfg.kind` (roman/number: look-alike characters l, |, 1 -> I where a numeral is
-expected), and compare against the candidates' titles or numbers as a closed set (kind "title":
-fuzzy ratio >= 90 like the title scorer). Frames combine by consensus: a reading counts when two
+expected; a run of exactly four I, which no title has, is read as three), and compare against
+the candidates' titles or numbers as a closed set (kind "title": fuzzy ratio >= 90 like the title
+scorer). Frames combine by consensus: a reading counts when two
 or more frames agree or it matches exactly one candidate; readings that disagree, or match
 nothing, give 0. Raw LLR is `MATCH_LLR` on the single matched candidate, never negative.
 """
@@ -27,6 +28,19 @@ def normalize_roman(text: str) -> str | None:
     """Uppercase roman numeral from OCR text (look-alikes l | 1 ! -> I), or None if invalid."""
     t = re.sub(r"[^A-Za-z]", "", text.translate(_LOOKALIKE).upper())
     return t if t and _ROMAN.match(t) else None
+
+
+def repair_roman(text: str) -> str | None:
+    """OCR over-counts a trailing III as four strokes (real reads: XXIIII for XXIII, XCIIII for
+    XCIII). `IIII` is not a numeral in any title, so a run of exactly four I becomes three (decision
+    54). Only an otherwise invalid reading is repaired; longer or shorter runs are left alone."""
+    t = re.sub(r"[^A-Za-z]", "", text.translate(_LOOKALIKE).upper())
+    if not t or _ROMAN.match(t) or len(re.findall(r"I{4,}", t)) != 1:
+        return None
+    if max(map(len, re.findall(r"I+", t))) != 4:
+        return None
+    fixed = re.sub(r"I{4}", "III", t)
+    return fixed if _ROMAN.match(fixed) else None
 
 
 def _digits(text: str) -> str | None:
@@ -68,7 +82,7 @@ class TitleCardScorer:
                     continue
                 ref = m.group("ref")
                 if cfg.kind == "roman":
-                    reading = normalize_roman(ref)
+                    reading = normalize_roman(ref) or repair_roman(ref)
                 elif cfg.kind == "number":
                     reading = _digits(ref)
                 else:

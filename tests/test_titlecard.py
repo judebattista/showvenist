@@ -6,7 +6,7 @@ from showvenist.analysis.types import CardRead
 from showvenist.bundle.schema import Bundle, Episode, ShowInfo, TitleCardConfig
 from showvenist.config import load_config
 from showvenist.fusion import fuse
-from showvenist.scoring.titlecard import MATCH_LLR, TitleCardScorer
+from showvenist.scoring.titlecard import MATCH_LLR, TitleCardScorer, repair_roman
 from showvenist.scoring.types import Candidate, FileInfo, ScoreContext
 
 JACK = ["X", "XI", "XVIII", "XXIII", "XXV", "XXVIII", "XXXIV", "XLVIII", "LII", "XCIII", "LI"]
@@ -59,10 +59,26 @@ def test_lookalike_normalisation_single_read():
     assert hits(run(JACK, fi("EPISODE XClll"))) == [9]  # XCIII
 
 
-def test_unnormalisable_ocr_is_ignored():
-    # 'Xxiill' / 'XXiIll' normalise to XXIIII: not a numeral, so no evidence at all
-    r = run(JACK, fi("EPISODE Xxiill", "EPISODE XXiIll"))
+def test_four_strokes_read_as_three():
+    # real OCR: 'Xxiill' / 'XXiIll' for XXIII and 'XCIlll' for XCIII (one I too many)
+    assert hits(run(JACK, fi("EPISODE Xxiill", "EPISODE XXiIll"))) == [3]
+    assert hits(run(JACK, fi("EPISODE XCIlll"))) == [9]
+    assert repair_roman("XCIIII") == "XCIII" and repair_roman("XIIII") == "XIII"
+
+
+def test_only_a_run_of_exactly_four_is_repaired():
+    assert repair_roman("XIIIII") is None  # five
+    assert repair_roman("XXIIV") is None   # not a run of I
+    assert repair_roman("XCIII") is None   # already valid: nothing to repair
+    assert repair_roman("IIII") == "III"
+    # an unrepairable reading gives no evidence but the file stays available
+    r = run(JACK, fi("EPISODE XXIIIII"))
     assert r.available[0] and not hits(r)
+
+
+def test_repaired_reading_still_needs_a_candidate_and_consensus():
+    assert not hits(run(["X", "XI"], fi("EPISODE XXIIII")))   # XXIII is no candidate
+    assert not hits(run(JACK, fi("EPISODE XXIIII", "EPISODE XCIIII")))  # disagree
 
 
 def test_noise_does_not_break_consensus():
