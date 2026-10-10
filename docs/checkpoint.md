@@ -91,9 +91,9 @@ inherited orderings · **54 title-card scorer (opt-in per show via `overrides.ya
   no copyrighted media in tests/git; `data/` is gitignored.
 - The user wants a partner: recommend, question, one topic at a time; a rejected prompt means "let me talk".
 - Paid LLM runs: key is in `~/.config/showvenist/claude.api.key`; run with
-  `ANTHROPIC_API_KEY="$(cat ~/.config/showvenist/claude.api.key)" .venv/bin/showvenist eval … --llm auto --yes`
+  `ANTHROPIC_API_KEY="$(cat ~/.config/showvenist/claude.api.key)" .venv/bin/showvenist eval … --llm auto --budget N`
   (never print the key). **The auto-mode classifier blocks any Bash command that puts the key in the environment,
-  even for a cached-only run; ask the user to run such a command with `!`.** Without `--yes`, eval uses the LLM
+  even for a cached-only run; ask the user to run such a command with `!`.** Without `--budget`, eval uses the LLM
   only where every answer is cached, so a re-run costs nothing; `LlmScorer` can be built without a key for that.
   TMDB token: `~/.config/tmdb/api.token` → `SHOWVENIST_TMDB_API_KEY="$(cat …)"` for `ingest`.
 - Env overrides: `SHOWVENIST_<SECTION>_<FIELD>` (e.g. `SHOWVENIST_LLM_SCOPE=season`,

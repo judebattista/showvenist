@@ -598,9 +598,10 @@ def identify(
     llm: str | None = typer.Option(
         None, "--llm", help="off|auto|all (default: llm.mode in config.toml, normally off)"
     ),
-    yes: bool = typer.Option(
-        False, "--yes", help="Allow the paid LLM calls whose estimated cost is printed; with "
-        "--apply, also move files without typing yes (needed without a TTY)"
+    budget: float = typer.Option(
+        0.0, "--budget",
+        help="Most you allow the paid LLM calls to cost, in USD (default 0: nothing is sent; "
+        "the estimate is printed first)",
     ),
     reanalyze: bool = typer.Option(
         False, "--reanalyze", help="Ignore files already confirmed in history (analyze them again)"
@@ -619,7 +620,12 @@ def identify(
     do_apply: bool = typer.Option(
         False, "--apply",
         help="Print the plan, then move the files after you type yes (without a TTY only "
-        "with --yes)",
+        "with --confirm)",
+    ),
+    confirm: str | None = typer.Option(
+        None, "--confirm",
+        help="With --apply: move without typing yes if the plan hashes to this token "
+        "(printed by --plan), or 'last' for the most recent --plan's token",
     ),
     root: Path | None = typer.Option(None, "-o", help="Bundle root directory"),
 ) -> None:
@@ -628,7 +634,7 @@ def identify(
     PATHS may be files or Show / Season / Disc folders (§5). The parsed tree is printed to
     stderr before analysis. Each season in the tree is solved on its own and reported.
     --plan adds the move list (§13) and writes nothing; --apply moves the files after a typed
-    yes, with a move log that `showvenist undo` reverses."""
+    yes (or with --confirm), with a move log that `showvenist undo` reverses."""
     import json as _json
     from dataclasses import replace
 
@@ -644,9 +650,26 @@ def identify(
 
     if sum((as_report, as_json, as_plan, do_apply)) > 1:
         _fail("--report, --json, --plan and --apply are exclusive")
-    if do_apply and not yes and not _interactive():
+    if confirm is not None and not do_apply:
+        _fail("--confirm only goes with --apply")
+    if budget < 0:
+        _fail("--budget must not be negative")
+    confirm_token = None
+    if confirm is not None:
+        from showvenist.rename.token import normalize_token, read_last_token
+
+        if confirm.strip().lower() == "last":
+            saved = read_last_token()
+            if saved is None:
+                _fail("no saved plan token: run --plan first")
+            confirm = saved
+        try:
+            confirm_token = normalize_token(confirm)
+        except ValueError as e:
+            _fail(str(e))
+    if do_apply and confirm_token is None and not _interactive():
         _fail("identify --apply: no TTY, so nothing is moved; use --plan to see the moves, or "
-              "add --yes to apply them from a script")
+              "add --confirm TOKEN (from --plan) or --confirm last to apply them from a script")
     cfg = load_config()
     hcfg = cfg.hierarchy
     sig = _parse_signals(signals)
@@ -781,8 +804,8 @@ def identify(
                 est = scorer.estimate_cost(sess.files, sess.context())
                 typer.echo(f"LLM ({mode}): {len(scorer.send)} file(s) to send, estimated "
                            f"${est:.4f} (cached responses are free)", err=True)
-                if est > 0 and not yes:
-                    _fail("Not sending: re-run with --yes to allow these paid API calls.")
+                if est > budget:
+                    _fail(_over_budget(est, budget))
                 sess.apply_llm(scorer)
                 typer.echo(f"LLM spend: ${scorer.total_cost_usd:.4f}", err=True)
         report = sess.report()
@@ -790,7 +813,7 @@ def identify(
             report.notices.append(
                 "No reference subtitles and the LLM is off: nearly every file will need "
                 "review. Add reference subtitles with `showvenist ingest --subs DIR`, or use "
-                "`--llm auto --yes` (the estimated cost is printed first)."
+                "`--llm auto --budget N` (the estimated cost is printed first)."
             )
         if allow_duplicates and not sess.near:
             report.notices.append(
@@ -823,7 +846,7 @@ def identify(
     if as_plan or do_apply:
         try:
             code = _plan_and_apply(reports, bundle, cfg, marker, hist, hist_db, do_apply,
-                                   yes, interactive, exit_code, render_tables)
+                                   confirm_token, interactive, exit_code, render_tables)
         finally:
             if hist_db is not None:
                 hist_db.close()
@@ -844,16 +867,26 @@ def identify(
     raise typer.Exit(_final_exit_code(done, exit_code))
 
 
+def _over_budget(est: float, budget: float) -> str:
+    import math
+
+    need = math.ceil(est * 100 - 1e-9) / 100
+    return (f"Not sending: estimated ${est:.4f} exceeds --budget {budget:g}. "
+            f"Re-run with --budget {need:.2f} to allow these paid API calls.")
+
+
 def _typed_yes(question: str) -> bool:
     return typer.prompt(f"{question} Type yes to go ahead", default="",
                         show_default=False).strip() == "yes"
 
 
-def _plan_and_apply(reports, bundle, cfg, marker, hist, hist_db, do_apply: bool, yes: bool,
+def _plan_and_apply(reports, bundle, cfg, marker, hist, hist_db, do_apply: bool,
+                    confirm_token: str | None,
                     interactive: bool, exit_code, render_tables) -> int:
     """identify --plan / --apply (§4.3, decision 58): one plan per solved season, built by
     rename.plan.build_plan, printed in full; --apply moves through rename.movelog.apply_plan.
-    --plan writes nothing: state.db is read only when it already exists."""
+    --plan writes nothing: state.db is read only when it already exists (decision 60: it prints
+    a plan token and saves it; --apply --confirm needs the rebuilt plan to hash to the token)."""
     from showvenist.rename.movelog import PlanRefused, apply_plan
     from showvenist.rename.plan import build_plan
     from showvenist.rename.render import format_apply, format_plan
@@ -878,7 +911,14 @@ def _plan_and_apply(reports, bundle, cfg, marker, hist, hist_db, do_apply: bool,
         plans.append(plan)
         if not plan.ok:
             codes.append(1)
+    from showvenist.rename.token import normalize_token, plan_token, save_last_token
+
+    token = plan_token(plans)
     if not do_apply:
+        if any(p.moves for p in plans):
+            save_last_token(token)
+            typer.echo(f"Plan token: {token}  (apply with --apply --confirm {token}, or "
+                       "--confirm last)")
         return max(codes)
     if any(not p.ok for p in plans):
         typer.echo("Not applied: the plan has errors (nothing was moved).", err=True)
@@ -886,6 +926,10 @@ def _plan_and_apply(reports, bundle, cfg, marker, hist, hist_db, do_apply: bool,
     if not any(p.moves for p in plans):
         typer.echo("Nothing to move.")
         return max(codes)
+    if confirm_token is not None and normalize_token(token) != confirm_token:
+        typer.echo(f"Not applied: the plan changed since the token was made (token now "
+                   f"{token}). Nothing was moved.", err=True)
+        return 1
     db = hist_db if hist_db is not None else StateDb.open_default()
     try:
         for plan in plans:
@@ -893,10 +937,11 @@ def _plan_and_apply(reports, bundle, cfg, marker, hist, hist_db, do_apply: bool,
                 continue
 
             def confirm(p) -> bool:
-                return yes or _typed_yes(f"Move {len(p.moves)} file(s) as listed above?")
+                return confirm_token is not None or _typed_yes(
+                    f"Move {len(p.moves)} file(s) as listed above?")
 
             def confirm_cross(ms) -> bool:
-                # crossing filesystems copies and removes: always typed, never by --yes alone
+                # crossing filesystems copies and removes: always typed, never by --confirm alone
                 return interactive and _typed_yes(
                     f"{len(ms)} move(s) cross filesystems (copy, check, then remove the "
                     "original).")
@@ -1272,8 +1317,9 @@ def eval_cmd(
     llm: str | None = typer.Option(
         None, "--llm", help="off|auto|all (default: llm.mode in config.toml, normally off)"
     ),
-    yes: bool = typer.Option(
-        False, "--yes", help="Allow the paid LLM calls whose estimated cost is printed"
+    budget: float = typer.Option(
+        0.0, "--budget",
+        help="Most you allow the paid LLM calls to cost, in USD (default 0: nothing is sent)",
     ),
     show_errors: bool = typer.Option(
         False, "--show-errors", help="List the files that were wrong at high confidence"
@@ -1388,7 +1434,7 @@ def eval_cmd(
                        err=True)
 
     def approve(est: float) -> bool:
-        return yes or est == 0
+        return est <= budget
 
     llm_factory = (lambda: _llm_scorer(cfg, cache)) if mode != "off" else None
     all_decisions, result = run_eval(
@@ -1475,9 +1521,9 @@ def eval_cmd(
             typer.echo(f"wrote weights to {path}"
                        + ("" if llm_w else " ([weights.llm] left unchanged)"))
     if refused:
-        est = sum(g.llm_estimate_usd for g in refused)
-        _fail(f"LLM not run for {len(refused)} season(s): estimated ${est:.4f}. "
-              "Re-run with --yes to allow these paid API calls.")
+        est = max(g.llm_estimate_usd for g in refused)  # the budget is checked per season
+        _fail(f"LLM not run for {len(refused)} season(s). "
+              + _over_budget(est, budget).replace("Not sending: ", "", 1))
 
 
 if __name__ == "__main__":

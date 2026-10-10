@@ -41,7 +41,7 @@ Retail disc rips (MakeMKV output) come with meaningless names, and the titles on
 ### 1.2 Goals
 
 - Correctly identify season and episode for disc rips and badly named files of a **known** show.
-- **Identify most files without hand-checking, using the evidence the show allows.** Reference subtitles from a local folder give an offline path, with no API and no cost. The LLM scorer gives a networked path (an Anthropic key; about $0.42 per 24-episode season, and every paid call needs `--yes`; `llm.mode` stays `off` by default, so spending is always a conscious choice). Neither is assumed: metadata alone (synopses, guest names, duration) reached high confidence on 1 file in 409 (M3 baseline), while with the LLM on 64% reach high and top-1 is 88% (decision 44). With neither, `identify` still ranks candidates but sends nearly every file to review, and its report says so.
+- **Identify most files without hand-checking, using the evidence the show allows.** Reference subtitles from a local folder give an offline path, with no API and no cost. The LLM scorer gives a networked path (an Anthropic key; about $0.42 per 24-episode season, and every paid call needs a `--budget`; `llm.mode` stays `off` by default, so spending is always a conscious choice). Neither is assumed: metadata alone (synopses, guest names, duration) reached high confidence on 1 file in 409 (M3 baseline), while with the LLM on 64% reach high and top-1 is 88% (decision 44). With neither, `identify` still ranks candidates but sends nearly every file to review, and its report says so.
 - **Explain** every match: which signals contributed, how much, and what the runner-up was.
 - **Never change files destructively.** Nothing moves without explicit confirmation; every move is logged and can be undone.
 - Be **measurably** accurate. An evaluation harness exists from the first scoring milestone, and confidence levels are calibrated against labeled data.
@@ -166,12 +166,12 @@ showvenist identify PATHS... [--show NAME | --ref DIR] [--season N]
                     [--episodes RANGE|LIST] [--order NAME]
                     [--no-blocks] [--include-specials] [--allow-duplicates]
                     [--signals LIST] [--llm off|auto|all] [--reanalyze]
-                    [--report | --json | --plan | --apply [--yes]]
+                    [--budget USD] [--report | --json | --plan | --apply [--confirm TOKEN|last]]
 ```
 
 - `PATHS` can be files, or directories walked as a Show/Season/Disc hierarchy (§5). Explicit flags override anything inferred from folders or the marker file.
 - `--show NAME` resolves to the bundle at `$XDG_DATA_HOME/showvenist/shows/<slug>/`. If it doesn't exist, it's ingested with default sources. `--ref DIR` points to a bundle directory explicitly.
-- When the bundle has no reference subtitles and `--llm` is off, the report ends with one line saying that nearly every file will need review, and naming the two remedies (`ingest --subs DIR`, or `--llm auto --yes` with its estimated cost).
+- When the bundle has no reference subtitles and `--llm` is off, the report ends with one line saying that nearly every file will need review, and naming the two remedies (`ingest --subs DIR`, or `--llm auto --budget N`, whose estimated cost is printed).
 - `--episodes 5-8` or `--episodes S02E05,S02E09`: a manual scope override, e.g. typed from a case insert, or for a single disc ripped on its own without history.
 - `--order`: the starting matching order: any ordering in the bundle. Defaults to the show's `naming_order`, because you name season folders by your own convention. Ordering detection (§11.6) may still switch to a better-fitting order and report it.
 - `--no-blocks`: turn off the disc block model and solve each season without block constraints.
@@ -179,10 +179,11 @@ showvenist identify PATHS... [--show NAME | --ref DIR] [--season N]
 - `--allow-duplicates`: relax the at-most-once constraint (for duplicate rips of the same episode).
 - `--signals`: enable or disable individual scorers (for diagnosis and eval).
 - `--llm`: overrides the configured LLM mode. `off`; `auto` sends files below high confidence after the first solve; `all` sends every file (used by eval and fitting).
+- `--budget USD`: the most you allow the paid LLM calls to cost; default 0, so nothing is sent. `identify` prints the estimate first and, when it exceeds the budget, sends nothing and says which `--budget` would allow it (cached responses cost nothing). Decision 60.
 - `--reanalyze`: ignore history and the analysis cache for these files.
 - On a TTY, `identify` opens the **review TUI** (§12). With `--report` or `--json`, or when stdout isn't a TTY, it prints results and **never touches media files**. It writes nothing to `state.db` (§7.2), updates the analysis cache, and with `--show` may ingest a missing bundle.
 - Files already confirmed in history are reported straight from it, without re-analysis.
-- `--plan` prints the exact move list (old path → new path, flags, reason) and writes nothing (the plain non-TTY report is unchanged and has no plan). `--apply` prints the same plan and moves files after you type `yes`; without a TTY it refuses unless `--yes` is also given, so a script or pipe cannot move files by accident. Both use the same plan and apply functions as the TUI (§12), and the rules in §13 decide what is in a plan. Decision 58.
+- `--plan` prints the exact move list (old path → new path, flags, reason) and a plan token, and writes nothing to the library or `state.db` (the plain non-TTY report is unchanged and has no plan; the only side effects are the analysis cache and a `last-plan` file holding the token in the cache directory). The token is a hash of every move in the plan (kind, old path, new path, file fingerprint), shown as 8 hex characters in two groups (`7f3a-9c1e`). `--apply` prints the same plan and, on a TTY, moves files after you type `yes`. `--apply --confirm TOKEN` moves files only if the plan rebuilt now hashes to TOKEN (case and the dash are ignored); `--confirm last` uses the token of the most recent `--plan`. A mismatch moves nothing. Without a TTY, `--apply` refuses unless `--confirm` is given, so a script or pipe cannot move files by accident. Moves that cross filesystems still need a typed `yes` on a TTY and are refused otherwise (§13.4). Both use the same plan and apply functions as the TUI (§12), and the rules in §13 decide what is in a plan. Decision 58.
 
 ### 4.4 Other commands
 
@@ -190,9 +191,10 @@ showvenist identify PATHS... [--show NAME | --ref DIR] [--season N]
 - `assign FILE --extra`: records the file as a confirmed extra.
 - `history [--show NAME] [--season N]`: per season, which episodes are confirmed (with file paths), which are missing, and which files are confirmed extras.
 - `forget FILE|FINGERPRINT`: removes all records for that file (asks for confirmation).
+- `--yes` on `assign --rename`, `forget` and `undo` skips their y/N question; it does not exist on `identify` or `eval`.
 - `undo [--last | RUN_ID]`: reverses a run's moves, after showing them and asking for confirmation; the run's matches become `undone` (§13.5).
 - `inspect FILE`: probe data, readiness, chosen subtitle track, OCR'd dialogue per window, cache status. `--card` prints the OCR'd text of every sampled frame in the show's `title_card` windows (§6.6).
-- `eval (MANIFEST.csv | --from-history) [--show NAME] [--fit] [--llm …]`: see §16. `--show` limits a multi-show manifest to one show.
+- `eval (MANIFEST.csv | --from-history) [--show NAME] [--fit] [--llm …] [--budget USD]`: see §16. `--show` limits a multi-show manifest to one show.
 
 ### 4.5 Exit codes
 
@@ -1246,3 +1248,4 @@ Decisions made while writing this spec (2026-10-02) and reviewing it (from 2026-
 | 57 | Extras from disc folders are always prefixed with the disc folder's name when moved to `extras/`; any target that still collides (with another planned target or an existing file) gets a numeric suffix instead of aborting the plan | MakeMKV file names repeat across discs: 78 names repeat within a season folder across 225 unnamed rips (e.g. `Babylon 5 - Season 2_t00.mkv` in five discs). A collision-only prefix would make a file's name depend on what else is in the plan and change when a disc is added; an always-prefix rule is deterministic and tells you where the file came from. Chosen by the user |
 | 58 | M5 includes a command-line plan/apply surface before the TUI: `identify --plan` prints the exact moves and writes nothing; `identify --apply` prints the plan, needs a typed `yes`, and refuses without a TTY unless `--yes` is given. The TUI calls the same functions | The spec had moves only from the TUI's plan screen (M6), so M5 could not be used on a real season, and the move log and crash recovery could be tested only with test code. The same code path serves both. A first real run is done on a copied season, never on `/mnt/storage/tv` during development. Chosen by the user |
 | 59 | `state.db` records only what is decided or executed: no `proposed` rows; apply writes the run, confirmed matches and extras and the move log; a pin that overrides the tool's top choice records that choice as `rejected`; `assign` over a confirmed match marks it `rejected`; `undo` marks a run's matches `undone` (ignored by the prior, duplicate warnings and eval labels, kept for the record) | A plan or report is repeatable and recomputes from the same evidence, so stored proposals only pile up. Rejected matches still arrive where they matter (a human overrode the tool). Marking undone matches `rejected` would create false negative labels when a run is undone only to be redone. Chosen by the user |
+| 60 | Consent names what it approves. `--budget USD` (default 0) is the only way to allow paid LLM calls, in `identify` and `eval`; `identify --apply` outside a typed `yes` needs `--confirm TOKEN` (a hash of the exact plan) or `--confirm last` (the most recent `--plan`). `--yes` is removed from `identify` and `eval`; it stays only for the y/N prompts of `assign --rename`, `forget` and `undo`. Supersedes the `--yes` parts of decisions 45 and 58 | One `--yes` meant "spend money" in one place and "move files" in another. A budget also limits the spend, and a plan token ties consent to the plan that was shown: if the files or the evidence changed, the token no longer matches and nothing moves. `--confirm last` removes the typing. Chosen by the user |

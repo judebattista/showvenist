@@ -147,9 +147,10 @@ def test_apply_refusals(two_discs, monkeypatch):
     assert rows("select count(*) from rename_op") == [(0,)]
 
 
-def test_apply_with_yes_runs_without_a_tty(two_discs):
+def test_apply_with_confirm_runs_without_a_tty(two_discs):
     root, show, s = two_discs
-    r = identify(root, show, "--apply", "--yes")
+    assert identify(root, show, "--plan").exit_code == 0
+    r = identify(root, show, "--apply", "--confirm", "last")
     assert r.exit_code == 0, r.output
     assert files_under(s) == AFTER
     r = runner.invoke(cli.app, ["undo", "1", "--yes"])

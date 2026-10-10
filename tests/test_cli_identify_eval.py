@@ -175,20 +175,20 @@ def test_identify_report_and_signals(tmp_path, monkeypatch, no_real_llm):
         assert _ident(root, rips, "--signals", bad).exit_code == 1
 
 
-def test_identify_llm_needs_yes(tmp_path, monkeypatch, no_real_llm):
+def test_identify_llm_needs_budget(tmp_path, monkeypatch, no_real_llm):
     root, rips = setup(tmp_path, monkeypatch)
     # config default is off: no client is ever built
     r = _ident(root, rips)
     assert r.exit_code in (0, 2) and "LLM" not in r.stderr
     # with --llm all but without --yes: the estimate is printed, nothing is sent
     r = _ident(root, rips, "--llm", "all")
-    assert r.exit_code == 1 and "estimated $" in r.stderr and "--yes" in r.stderr
+    assert r.exit_code == 1 and "estimated $" in r.stderr and "--budget 0." in r.stderr
     clients = []
     monkeypatch.setattr(cli, "LLM_CLIENT_FACTORY",
                         lambda: clients.append(FakeLlmClient()) or clients[-1])
     r = _ident(root, rips, "--llm", "all")
     assert r.exit_code == 1 and not clients
-    r = _ident(root, rips, "--llm", "all", "--yes")
+    r = _ident(root, rips, "--llm", "all", "--budget", "5")
     assert r.exit_code in (0, 2), r.output
     assert len(clients) == 1 and len(clients[0].calls) == 4  # two files, both orders
     assert "LLM spend" in r.stderr
@@ -273,10 +273,10 @@ def test_eval_llm_guard_and_cost(tmp_path, monkeypatch, no_real_llm):
     monkeypatch.setattr(cli, "LLM_CLIENT_FACTORY",
                         lambda: clients.append(FakeLlmClient()) or clients[-1])
     r = runner.invoke(cli.app, ["eval", str(manifest), "-o", str(root), "--llm", "all"])
-    assert r.exit_code == 1 and "--yes" in r.stderr and "estimated $" in r.stderr
+    assert r.exit_code == 1 and "--budget" in r.stderr and "estimated $" in r.stderr
     assert not clients  # the estimate never builds a client
     r = runner.invoke(cli.app, ["eval", str(manifest), "-o", str(root), "--llm", "all",
-                                "--yes", "--fit"])
+                                "--budget", "5", "--fit"])
     assert r.exit_code == 0, r.output
     assert sum(len(c.calls) for c in clients) > 0
     assert "LLM cost: $" in r.stdout
