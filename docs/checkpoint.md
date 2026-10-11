@@ -1,20 +1,18 @@
-# showvenist: session checkpoint (2026-10-09)
+# showvenist: session checkpoint (2026-10-11)
 
-Written so a fresh context can resume. The spec (`docs/spec.md`, decision log §19, decisions 38–55) stays the
+Written so a fresh context can resume. The spec (`docs/spec.md`, decision log §19, decisions 38–60) stays the
 source of truth; Beads (`bd ready`, `bd list`) holds the tasks; this file is the narrative state and the
 operating notes. Read `CLAUDE.md`, then this, then `bd ready`.
 
 ## 1. Where the code is
 
-- Branch **`m4-hierarchy`** (head `f44d7a6`). Earlier branches are linear ancestors: `m0-spike` → `m1-bundle` →
+- Branch **`m4-hierarchy`** (head `d6523d0`). Earlier branches are linear ancestors: `m0-spike` → `m1-bundle` →
   `m3-scoring` → `m4-hierarchy`. **Nothing has been pushed; the user pushes.** Subagents never commit.
-- 808 tests pass; `ruff check .` clean. Python is **`.venv/bin/python`**, `.venv/bin/showvenist`, `.venv/bin/ruff`
+- 914 tests pass; `ruff check .` clean. Python is **`.venv/bin/python`**, `.venv/bin/showvenist`, `.venv/bin/ruff`
   (`uv` is no longer on the PATH; do not install anything).
-- Milestones: **M0–M4 done** and reviewed (one Opus conformance review each, findings fixed). Since the last
-  checkpoint, on the same branch: the **title-card scorer** (decisions 54–55, epic `sv-mxo`, closed), an **eval
-  fix for file-order leakage** (`sv-cn7`), and report flags (`sv-60p.14`). **M5 (state and renames) is next and
-  was ON HOLD** by the user; the user has now asked to start it with a design talk (§8). M6 (TUI) and M7 (more
-  adapters) follow. Epics: M5 `sv-o4f`, M6 `sv-zrm`, M7 `sv-opu`.
+- Milestones: **M0–M5 done** and reviewed (one Opus conformance review each, findings fixed; the M5 review's
+  fixes are `d6523d0`). **M6 (review TUI, `sv-zrm`) is next**, then M7 (more adapters, `sv-opu`). M5 epic `sv-o4f`
+  is closed.
 - Beads data is local (Dolt DB is gitignored); backup lives in `data/beads-backup/` (`bd backup sync`).
 
 ## 2. What exists (package `showvenist/`)
@@ -25,8 +23,22 @@ ocr, windows, pipeline, duplicates, inspect, cache, **cardframes**) · scoring (
 refsubs, synopsis, characters, cues, llm, candidates) · fusion · assign (basic, confidence, blocks, ordering) ·
 hierarchy (parse, marker, readiness) · session · report (+ **edgeflags**: advisory `play_all`,
 `possible_two_parter`) · eval (harness, manifest, runner, fit, render, labelsheet, mkmanifest) · cli (`ingest`,
-`bundle check`, `inspect [--card]`, `identify`, `eval`). Not built: state.db/history, rename plan/move log/undo
-(M5), TUI (M6), TVmaze/Wikipedia/merge (M7).
+`bundle check`, `inspect [--card]`, `identify [--plan|--apply]`, `eval [--from-history]`, `assign`, `history`,
+`forget`, `undo`) · **state** (migrations: schema v2, db with read-only open, history) · **rename** (types, naming,
+plan, sidecars, movelog: journaled apply and crash recovery, undo, token, render). Not built: TUI (M6),
+TVmaze/Wikipedia/merge (M7).
+
+**M5 (decisions 56–60).** Duplicates are never moved or deleted: the primary is renamed, other copies are renamed
+in place `<episode>_dupe_N`. Extras are always prefixed `disc2__<name>` with `_2`, `_3` collision suffixes, and
+nothing is overwritten (`renameat2(RENAME_NOREPLACE)`; cross-filesystem moves copy, fsync, verify the fingerprint,
+link, then remove, and need a typed `yes`). `state.db` records only what is decided or executed (confirmed,
+rejected, undone). The move log journals `planned`, then moves, then `done` plus the match in one transaction;
+`recover` runs at the start of every moving command and confirms the match from the row. One `identify --apply` is
+one run, so `undo --last` reverses it all. **Consent (decision 60):** `--budget USD` (default 0) is the only way to
+allow paid LLM calls (`identify`, `eval`); `identify --plan` prints a plan token (`7f3a-9c1e`) and saves it;
+`--apply` on a TTY asks for a typed `yes`, otherwise needs `--apply --confirm TOKEN|last`. `--yes` exists only on
+`assign --rename`, `forget` and `undo`. Report, `--plan`, `history` and `eval --from-history` open `state.db`
+read-only.
 
 **Title card (decision 54/55).** A show describes an on-screen title card in `overrides.yaml` (`title_card`:
 `windows` from either end, `pattern` with a named group `ref`, `kind` roman|number|title, `background`
@@ -72,7 +84,7 @@ in earlier checkpoints were inflated**, most for LLM-off runs.
   69 labeled near-length rows. The 12 labeled play-alls (`extra-multi`) are decided as extras 11 of 12 times, 0 taken
   for an episode at high. `play_all` (needs reference-subtitle window scores) does not fire in this library.
 
-## 4. Decisions in this stretch (spec §19, 38–55; read them there)
+## 4. Decisions in this stretch (spec §19, 38–60; read them there)
 
 38 M0 outcome 3 · 39 `wordfreq` OCR word check · 40 LLM evidence = `logit(p)+log(n−1)` · 41 `episode?` labels ·
 42 duration scorer · 43 OpenSubtitles live use parked · 44 M3 gate passed with a documented deviation · 45 gate
@@ -80,7 +92,9 @@ wording; `llm.mode` stays `off` · 46 ordering detection solves every ordering �
 params (slack 1, u=2, margin 4, threshold 15) · 49 `extra-multi` label · 50 two-part label `S01E01+S01E02` · 51
 `.showvenist-ignore` folders · 52 near-duplicate detection by dialogue overlap · 53 overrides `new_episodes` and
 inherited orderings · **54 title-card scorer (opt-in per show via `overrides.yaml`, closed-set match, for-only)** ·
-**55 a run of exactly four I in a Roman reading is read as three**. Also in the spec now: §16.1 file-order rule
+**55 a run of exactly four I in a Roman reading is read as three** · 56 duplicates renamed in place (`_dupe_N`) ·
+57 extras prefix and collision suffix · 58 CLI plan/apply before the TUI · 59 `state.db` records decided/executed only ·
+**60 `--budget` and `--confirm` replace `--yes`**. Also in the spec now: §16.1 file-order rule
 (eval shuffles), §14 note on the advisory `play_all`/`possible_two_parter` flags.
 
 ## 5. Standing rules and operating notes
@@ -139,18 +153,21 @@ SHOWVENIST_LLM_SCOPE=season .venv/bin/showvenist eval data/manifest-named.csv -o
 
 ## 8. Next steps (in this order; the user decides)
 
-1. **M5 design pass with the user** (state.db, history prior, `assign/history/forget/undo`, move plan, move log,
-   crash recovery). Open design questions to bring: what the plan does with duplicates (exact and near; keep the
-   best copy, move the rest to `extras/`, never delete?), `extra-multi` and `.showvenist-ignore` handling in the
-   plan, safety rules for the first command that touches the user's files. Start with the contract (`sv-o4f.1`).
-2. Open small items: `sv-60p.13` (cues gate: unanswerable without paid cue generation; leave experimental),
-   `sv-60p.15` (near-duplicate top-1 rule), `sv-31q` (duration σ with no season).
-3. Deferred: sparse-subtitle read cost (`sv-o2p.7`), loose files + disc blocks (`sv-o2p.9`), M6 TUI (`sv-zrm`,
-   after M5), M7 adapters (`sv-opu`; OpenSubtitles stays parked).
-4. Optional: a paid eval with the LLM over the labeled raw rips (estimate first, ask for the budget); fill the 35
+1. **M6 review TUI** (`sv-zrm`): a design talk first. Items waiting for it: an explicit file argument inside a disc
+   folder is flattened (the report cannot tell file from directory arguments); a pin that overrides the top choice
+   should record `rejected` (`History.reject` exists, nothing calls it); `report.render_tables` may mishandle
+   bracketed file names.
+2. M5 known gaps: a newer run's move links to the older run's match row (undoing the original marks that decision
+   undone though a later run moved the file again; a `superseded` status would fix it); no CLI test applies two
+   seasons in one invocation; byte-identical copies share a fingerprint. A first real `--apply` is done on a copy of
+   a season, never on `/mnt/storage/tv` during development.
+3. Open small items: `sv-60p.13` (cues gate: needs paid cue generation), `sv-60p.15` (near-duplicate top-1
+   rule), `sv-31q` (duration σ with no season).
+4. Deferred: sparse-subtitle read cost (`sv-o2p.7`), loose files + disc blocks (`sv-o2p.9`), M7 adapters
+   (`sv-opu`; OpenSubtitles stays parked).
+5. Optional: a paid eval with the LLM over the labeled raw rips (estimate first, ask for the budget); fill the 35
    skipped Supernatural near-length rows with `episode?`; generalize title cards to other shows (config only);
-   make production tie-breaking independent of file order (e.g. canonicalize order by fingerprint) if the user
-   wants it strictly.
+   make production tie-breaking independent of file order if the user wants it strictly.
 
 ## 9. Waiting on the user
 
