@@ -857,13 +857,15 @@ The engine exposes a `Session` API. The TUI and report mode are both thin client
 | `analyze()` | Runs extraction; streams per-file progress and results |
 | `solve()` | Fusion + assignment + confidence |
 | `pin(file, episode \| extra)` / `unpin(file)` | Fix or release a match; triggers a re-solve |
-| `ask_llm(file)` | Run the LLM scorer on one file; triggers a re-solve |
+| `ask_llm(file)` | Run the LLM scorer on one file within the budget; triggers a re-solve |
+| `explain(file)` | The detail for the evidence pane: top candidates with odds, each signal's contribution per candidate, notes (lines, guests, synopsis, LLM quotes), duration against runtime (§12.4) |
+| `overridden()` | For each pinned file, what the tool would have chosen without that pin (the `rejected` record, §7.2) |
 | `plan()` | Build the move plan (§13) |
 | `apply(plan)` | Execute it, writing the move log first |
 
 ### 12.2 TUI (Textual)
 
-Full-screen, keyboard-driven, works over SSH (including Windows Terminal).
+Full-screen, keyboard-driven, works over SSH (including Windows Terminal). Opened by `identify` on a TTY without `--report`, `--json`, `--plan` or `--apply`. Decision 61.
 
 ```
 ┌ Firefly · Season 1 · DVD order ──────────────── analyzing 15/17 ┐
@@ -873,22 +875,26 @@ Full-screen, keyboard-driven, works over SSH (including Windows Terminal).
 │  ✗ t04 extra (6m12s)    │ Evidence      a        b              │
 │ FIREFLY_D3              │  refsubs    +9.1     −2.0             │
 │  ? t01 E09 Ariel  14:1  │  guests     +2.3      0               │
-│  … t02 (writing…)       │  duration   +0.4     +0.4             │
+│  … t02 (reading…)       │  duration   +0.4     +0.4             │
 │                         │ Lines: "…" · "…" · "…"                │
 │                         │ Synopsis (a): …                       │
 ├─────────────────────────┴───────────────────────────────────────┤
-│ a/b accept · e enter S01E## · x extra · u unpin · l ask LLM ·   │
-│ p plan · q quit                                                 │
+│ a/b/c accept · e S01E## · x extra · u unpin · l ask LLM ·       │
+│ p plan · ? help · q quit                                        │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-- **Left pane:** season → disc → file tree with status: ✓ high, ? needs review, ✗ extra, … not ready or still analyzing.
-- **Right pane:** the selected file's candidates with odds; each signal's contribution for the winner vs. the runner-up; matched dialogue lines; guest names found; duration vs. runtime; the synopsis; verified LLM quotes when available.
-- **Live updates:** results appear as each file finishes analysis.
-- **Pin + re-solve:** accept a candidate, enter `S01E##`, mark as an extra, or unpin. Each action re-solves the season immediately (fast, because analysis is cached and block scores are reused for discs the pin didn't touch, §11.5) and moves the cursor to the **next least-confident file**. Files that become high confidence drop out of the queue, so you usually review fewer files than were initially flagged.
-- **`l` ask LLM** (when configured): runs the LLM scorer on the selected file and re-solves. **`L`** does the same with the full season as candidates, offered when the disc window failed (§10.2).
-- **`p` plan screen:** every planned move (before/after paths, sidecars, extras moves), collision check, then confirm → apply → summary.
-- **Startup dialogs:** show disambiguation, marker-file confirmation, disc-order confirmation for unnumbered discs.
+- **Seasons.** One tab per season. Seasons are analyzed one after another in the background, in tree order, and you can review a finished season while the next one reads. Pins and the plan are per season; `p` plans every finished season, and one apply is one run.
+- **Analysis shows progress, not results.** The solve needs every file's evidence, so a season shows each file's state as it finishes (queued, reading, ready, unreadable, not ready) and a progress bar. The first solve runs when the season's analysis ends and the cursor lands on its least-confident file. There are no interim solves.
+- **Threads.** The UI never touches `Session` while a slow operation runs. `analyze`, `ask_llm` and `apply` run as exclusive thread workers and the keys that would change the session are disabled with the reason in the footer. `pin`, `unpin`, `solve` and `plan` are fast and run inline. Quitting during analysis cancels the worker; the analysis cache keeps what finished.
+- **Left pane.** Season → disc → file tree. Glyphs: `✓` high, `?` needs review, `✗` extra, `•` pinned by you (keeps its confidence glyph's colour), `=` duplicate, `…` not ready or still reading. By default only files that need review are listed (`f` toggles "all"); files already named as episodes and ignored folders show greyed out in "all" and cannot be acted on.
+- **Right pane.** Flags banner (duplicate of X, possible two-parter, play-all, history); the top three candidates with odds; each signal's contribution for each of them; matched dialogue lines, guest names, duration against runtime, the synopsis, and verified LLM quotes. Below 100 columns the pane moves under the tree.
+- **Keys.** `j`/`k` or arrows move; `n`/`N` the next/previous file in the review queue; `a`/`b`/`c` accept a candidate; `e` opens an entry that takes any text with two separate numbers, read as season then episode (`S05E03`, `5x03`, `5-3`, `5 3`), and rejects anything that is not an episode of the active ordering (the range is shown; season 0 only when specials are in scope); `x` extra; `u` unpin; `Esc` undoes the last pin; `l` ask LLM; `f` filter; `p` plan; `?` help; `q` quit.
+- **Pin + re-solve.** Each action re-solves the season at once (analysis is cached; block scores are reused for discs the pin didn't touch, §11.5) and moves the cursor to the next least-confident file. Files that become high confidence drop out of the queue.
+- **`l` ask LLM** works only within `--budget` (decision 60): it shows the estimate and sends if it fits what is left, otherwise says which `--budget` would allow it. With the default budget of 0 nothing is sent. `L` (the full season as candidates, §10.2) is not in the first version.
+- **Pins live in memory** until apply (decision 59). Quitting with pins or an unapplied plan asks apply, discard or stay.
+- **`p` plan screen.** Every planned move grouped by season and disc as `old → new`, sidecars indented under their video, extras and `_dupe_N` copies marked. Each row has a checkbox (space), ticked by default; unticking a primary also unticks its `_dupe_N` copies. Unticking rebuilds the plan with `exclude=`, so the screen shows exactly what `build_plan` returns, with the collision check live. The footer shows the plan token and counts. `Enter` opens a y/n confirm (moves that cross filesystems get a second one, §13.4), then the apply runs as a worker and a summary lists what moved, what failed and why, the run id, and `showvenist undo --last`.
+- **Startup questions** (show disambiguation, marker confirmation, disc-order confirmation for unnumbered discs) are plain terminal prompts before the TUI opens.
 
 ### 12.3 Report mode
 
@@ -901,6 +907,16 @@ Full-screen, keyboard-driven, works over SSH (including Windows Terminal).
 Report mode **never touches media files**: no renames, no moves.
 
 `--json` emits the same content in a stable, versioned schema (`report_version`), for scripts and eval.
+
+### 12.4 TUI contract
+
+- Modules: `showvenist/tui/app.py` (App, season tabs, workers), `tree.py`, `evidence.py`, `plan.py`, `dialogs.py` (entry, confirm, quit). No matching or planning logic in them: they call `Session`, `build_plan`, `apply_plan`, `recover` and `History`.
+- `Session.explain(file, n=3) -> FileDetail` (dataclass in `report_schema.py` or `session.py`): `candidates` (the top n columns with `episode_id`, label, title, score, `delta` to the best, odds), `signals` (per candidate, the same `SignalContribution` list the report uses), `notes` (text lines from the scorers' `ScoreResult.notes` for those candidates: matched lines, guests, synopsis, verified LLM quotes), `duration_s`, `runtimes` (per candidate). No new scoring.
+- `Session.overridden() -> dict[Path, Decision | None]`: for each pinned file, the decision a solve without that one pin gives (`None` when it matches the pin, so only real overrides are listed). `Session` state is unchanged afterwards.
+- `identify` calls `History.reject` for each override at apply, in the same transaction family as the confirmed matches (§7.2); the CLI `--apply` path has no pins, so it records none.
+- `FileNode` gains `explicit: bool` (set for paths the user gave as files, not found by walking a directory). `build_plan` renames explicit files in place and flattens the rest (§13.2).
+- The apply is `apply_plan(..., run_id=...)` with one run for the invocation, exactly as the CLI.
+- Tests: Pilot tests on a synthetic season (open, analysis finishes, pin, re-solve and cursor jump, `e` valid and invalid, `u`/`Esc`, filter, plan untick, confirm, apply, summary, quit with pending pins, `l` refused at budget 0, width below 100). The SSH check from Windows Terminal is manual.
 
 ---
 
@@ -920,7 +936,7 @@ Report mode **never touches media files**: no renames, no moves.
 - High-confidence matches and identified extras (§11.7), and pinned matches of any confidence. Medium and low matches only once pinned.
 - **Files already named as episodes are never renamed or moved automatically** (§5.5), not even to apply the naming template or to flatten a disc folder.
 - **Hierarchy input:** matched files are **flattened** from `<Season>/<Disc>/` into `<Season>/`.
-- **Plain file arguments:** renamed in place.
+- **Plain file arguments:** renamed in place: a file the user gave as a file (not found by walking a directory) is renamed where it is, even inside a disc folder.
 - **Identified and confirmed extras** (including play-alls, decision 49) move to `<Season>/extras/`, which Jellyfin treats as extras. This is on by default (`move_extras`) and each one can be unticked on the plan screen. An extra that comes from a disc folder is always prefixed with that folder's name: `extras/disc2__Babylon 5 - Season 2_t00.mkv`. MakeMKV names files by title number within a disc, so names repeat across discs (78 names repeat within a season folder across 225 unnamed rips in the library). A file with no disc folder keeps its name. Decision 57.
 - **Duplicates** (exact and near, §14) are never moved or deleted. The primary copy is renamed and flattened as above; every other copy stays in its folder and is renamed in place to `<episode name>_dupe_<X>.<ext>`, e.g. `the_west_wing_s01e02_dupe_1.mkv`. X counts per episode from 1, ordered by quality and then path, and continues from the highest number already used (read from `state.db` and the folder), so numbers are never reused. Sidecars follow. The parser treats `_dupe_N` as already named (§5.5), so re-runs do not rename them again. The name still carries the episode tag, so Jellyfin may list a copy as a second occurrence of the episode if its folder is in the library; that risk is accepted because correctly named files are easy to find and fix. Decision 56.
 - Never in a plan: files already named as episodes, files in `.showvenist-ignore` folders (decision 51), and files that are unreadable or not ready.
@@ -1251,3 +1267,4 @@ Decisions made while writing this spec (2026-10-02) and reviewing it (from 2026-
 | 58 | M5 includes a command-line plan/apply surface before the TUI: `identify --plan` prints the exact moves and writes nothing; `identify --apply` prints the plan, needs a typed `yes`, and refuses without a TTY unless `--yes` is given. The TUI calls the same functions | The spec had moves only from the TUI's plan screen (M6), so M5 could not be used on a real season, and the move log and crash recovery could be tested only with test code. The same code path serves both. A first real run is done on a copied season, never on `/mnt/storage/tv` during development. Chosen by the user |
 | 59 | `state.db` records only what is decided or executed: no `proposed` rows; apply writes the run, confirmed matches and extras and the move log; a pin that overrides the tool's top choice records that choice as `rejected`; `assign` over a confirmed match marks it `rejected`; `undo` marks a run's matches `undone` (ignored by the prior, duplicate warnings and eval labels, kept for the record) | A plan or report is repeatable and recomputes from the same evidence, so stored proposals only pile up. Rejected matches still arrive where they matter (a human overrode the tool). Marking undone matches `rejected` would create false negative labels when a run is undone only to be redone. Chosen by the user |
 | 60 | Consent names what it approves. `--budget USD` (default 0) is the only way to allow paid LLM calls, in `identify` and `eval`; `identify --apply` outside a typed `yes` needs `--confirm TOKEN` (a hash of the exact plan) or `--confirm last` (the most recent `--plan`). `--yes` is removed from `identify` and `eval`; it stays only for the y/N prompts of `assign --rename`, `forget` and `undo`. Supersedes the `--yes` parts of decisions 45 and 58 | One `--yes` meant "spend money" in one place and "move files" in another. A budget also limits the spend, and a plan token ties consent to the plan that was shown: if the files or the evidence changed, the token no longer matches and nothing moves. `--confirm last` removes the typing. Chosen by the user |
+| 61 | M6 first version: seasons are tabs analyzed in the background in tree order; analysis shows progress and the first solve runs when a season's analysis ends (no interim solves, which changes §12.2's "results appear as each file finishes"); slow operations are exclusive thread workers and the UI never touches `Session` while one runs; startup questions are plain prompts before the TUI; pins are in memory until apply; `l` obeys `--budget` and `L` is deferred; `e` takes any text with two separate numbers (season, episode) that names an episode of the active ordering; the review list hides files that need no review (`f` shows all); a pin that overrides the tool's choice records the choice as `rejected` at apply; explicit file arguments are renamed in place | A solve needs all the evidence, so interim confidences would change under the cursor. A single writer needs no locks. Startup dialogs are one-off questions that cost a lot as screens. Spending stays under the one consent rule of decision 60. Overrides are the negative labels decision 59 promised, and explicit files were being flattened against §13.2. Chosen by the user |
