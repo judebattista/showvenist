@@ -3,7 +3,8 @@
 Choices made where the spec leaves room (all on the safe side):
 - The season folder of a file is its parent, or the parent's parent when the parent is the
   file's disc folder (`FileReport.disc` equals the parent's name) or an `extras` folder. Plain
-  files outside a disc folder are therefore renamed in place.
+  files outside a disc folder are therefore renamed in place; so are explicit files
+  (`FileReport.explicit`, given as file arguments), even inside a disc folder (§13.2).
 - When the naming order puts an episode in another season than the season folder's number (a
   folder name that parses as a season), the file needs a pin; a pinned file moves to an existing
   sibling folder of that season, and is skipped (`out_of_scope`) when no such folder exists:
@@ -99,9 +100,14 @@ class _Video:
     reason: str = ""
 
 
-def _season_dir(old: Path, disc: str | None) -> tuple[Path, str | None]:
-    """(season folder, disc folder name or None) for a file (see the module docstring)."""
+def _season_dir(
+    old: Path, disc: str | None, explicit: bool = False
+) -> tuple[Path, str | None]:
+    """(season folder, disc folder name or None) for a file (see the module docstring). An
+    explicit file (given as a file argument, §13.2) stays in its own folder, disc folder or not."""
     parent = old.parent
+    if explicit and parent.name.lower() != EXTRAS_DIR:
+        return parent, None
     if disc is not None and parent.name == disc:
         return parent.parent, parent.name
     if parent.name.lower() == EXTRAS_DIR:
@@ -246,7 +252,7 @@ def build_plan(
                  key=lambda v: (v.season, v.episode, str(v.old)))
     extras = sorted((v for v in videos if v.kind == "extra"), key=lambda v: str(v.old))
     for v in eps + extras:
-        season_dir, disc_dir = _season_dir(v.old, v.fr.disc)
+        season_dir, disc_dir = _season_dir(v.old, v.fr.disc, v.fr.explicit)
         ext = v.old.suffix
         if v.kind == "episode":
             folder_season = parse_season(season_dir.name)
@@ -310,7 +316,8 @@ def build_plan(
         stem = prim.stem
         assert stem is not None
         mark = (stem + "_dupe_").lower()
-        folders = {old.parent for _, old in copies} | {_season_dir(prim.old, prim.fr.disc)[0]}
+        folders = {old.parent for _, old in copies} | {
+            _season_dir(prim.old, prim.fr.disc, prim.fr.explicit)[0]}
         used = [naming.parse_dupe(n) or 0 for f in folders for n in _listdir(f)
                 if n.lower().startswith(mark)]
         x = max([history.highest_dupe_index(report.show_slug, eid) if history else 0, *used])

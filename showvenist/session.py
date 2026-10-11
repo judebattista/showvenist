@@ -67,12 +67,14 @@ from showvenist.edgeflags import play_all, possible_two_parter
 from showvenist.fusion import fuse
 from showvenist.hierarchy.marker import _find_ordering, named_episodes
 from showvenist.hierarchy.types import DiscNode, FileNode, Marker, SeasonNode, ShowNode
+from showvenist.report import _decision, _signals, build_report, format_odds, note_lines
 from showvenist.report import _version as report_version
-from showvenist.report import build_report, format_odds
 from showvenist.report_schema import (
+    CandidateDetail,
     Confidence,
     Decision,
     EpisodeRef,
+    FileDetail,
     FileReport,
     Report,
     Summary,
@@ -88,6 +90,7 @@ from showvenist.scoring.title import TitleScorer
 from showvenist.scoring.titlecard import TitleCardScorer
 from showvenist.scoring.types import (
     HIGH_DELTA,
+    REGIME_SCORERS,
     Assignment,
     Candidate,
     FileConfidence,
@@ -1155,6 +1158,70 @@ class Session:
             self.pins.pop(self.files[i].path, None)
         return self.solve()
 
+    def overridden(self) -> dict[Path, Decision | None]:
+        """For each pinned file whose pin differs from what a solve without that one pin picks,
+        that decision (§12.4). Pins that agree with the tool are left out. Session state (pins,
+        last solution, ordering choice and caches) is unchanged afterwards."""
+        if not self.pins:
+            return {}
+        saved = (dict(self.pins), self.solution, self._choice, self.ordering, self.candidates,
+                 dict(self._evid), dict(self._oos), set(self._window_failed))
+        out: dict[Path, Decision | None] = {}
+        try:
+            for path, eid in saved[0].items():
+                self.pins = {p: e for p, e in saved[0].items() if p != path}
+                sol = self.solve()
+                i = self._index(path)
+                got = _decision(sol.assignment.column[i], sol.candidates)
+                same = (got.kind == "extra") if eid is None else (
+                    got.episode is not None and got.episode.episode_id == eid)
+                if not same:
+                    out[path] = got
+        finally:
+            (self.pins, self.solution, self._choice, self.ordering, self.candidates,
+             self._evid, self._oos, self._window_failed) = saved
+        return out
+
+    def explain(self, file: Path | str | int, n: int = 3) -> FileDetail:
+        """The evidence pane for one file (§12.4): its top `n` candidates by fused score with
+        odds against the best, each one's signal contributions, notes and runtime. Reads the
+        last solution (solving first when there is none); no new scoring. Named and side rows
+        have no evidence: ValueError, as for `pin`."""
+        try:
+            i = self._index(file)
+        except KeyError:
+            p = Path(file) if not isinstance(file, int) else None
+            if p is not None and (p in self.named or p in self.not_ready or p in self.errors
+                                  or p in self.confirmed_extras):
+                raise ValueError(f"{p.name} has no evidence to explain") from None
+            raise
+        if i >= len(self.files):
+            raise ValueError(f"{self.rows[i].path.name} is named as an episode: no evidence")
+        sol = self.solution or self.solve()
+        f = sol.files[i]
+        regime = sol.fused.regimes[i]
+        row = sol.fused.S[i]
+        top = sorted(range(len(sol.candidates)), key=lambda j: (-row[j], j))[:n]
+        best = float(row[top[0]]) if top else 0.0
+        cands = []
+        for j in top:
+            c = sol.candidates[j]
+            notes: list[str] = []
+            for name in REGIME_SCORERS[regime]:
+                res = sol.results.get(name)
+                if res is not None and (i, j) in res.notes:
+                    notes += note_lines(name, res.notes[(i, j)])
+            syn = next((s.text for s in c.episode.synopses if s.text), None)
+            delta = best - float(row[j])
+            cands.append(CandidateDetail(
+                episode_id=c.id, label=c.label, title=c.episode.title, score=float(row[j]),
+                delta=delta, odds=format_odds(delta),
+                signals=_signals(i, regime, sol.fused, j, None, False), notes=notes,
+                synopsis=syn, runtime_min=c.episode.runtime_min,
+            ))
+        return FileDetail(path=str(f.path), duration_s=f.duration_s, regime=regime,
+                          candidates=cands)
+
     # ---- report ----------------------------------------------------------------------------
 
     @property
@@ -1342,6 +1409,10 @@ class Session:
             for info in self.confirmed_extras.values()
         ]
         dup = self._duplicate_ranks()
+        explicit = {p for p, (_, n) in self._node.items() if n.explicit}
+        rep = rep.model_copy(update={"files": [
+            r.model_copy(update={"explicit": True}) if Path(r.path) in explicit else r
+            for r in rep.files]})
         all_rows = [
             r.model_copy(update={"duplicate_of": str(dup[r.path][0]),
                                  "duplicate_rank": dup[r.path][1]})
@@ -1437,7 +1508,33 @@ class Session:
         return self._plain_row(n.info, "episode", ref, flags, high=True)
 
 
+def record_overrides(hist, sess: Session, run_id: int | None, show_slug: str) -> int:
+    """Record what the tool would have chosen for each pin that overrides it as a `rejected`
+    match in `hist` (§7.2, decision 61); returns how many. A pin equal to the tool's own top
+    choice records nothing. Nothing is recorded when the session has no pins."""
+    n = 0
+    files = {f.path: f for f in sess.files}
+    for path, d in sess.overridden().items():
+        if d is None or path not in files:
+            continue
+        ep = d.episode
+        f = files[path]
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = 0
+        hist.touch_file(f.fingerprint, size=size, path=str(path))  # the match row links to it
+        hist.reject(
+            f.fingerprint, show_slug, episode_id=ep.episode_id if ep else None, run_id=run_id,
+            season=ep.season if ep else None, episode=ep.episode if ep else None,
+            title=ep.title if ep else None,
+        )
+        n += 1
+    return n
+
+
 __all__ = [
+    "record_overrides",
     "FLAG_CONFIRMED",
     "FLAG_DISC_WINDOW_FAILED",
     "FLAG_DUPLICATE",

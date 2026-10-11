@@ -95,6 +95,28 @@ def _signals(
     return out
 
 
+def note_lines(name: str, note: dict) -> list[str]:
+    """Readable lines for one scorer's `ScoreResult.notes` entry (one file, one candidate)."""
+    out: list[str] = []
+    if name == "refsubs":
+        if "containment" in note:
+            out.append(f"refsubs: {float(note['containment']):.0%} of the reference matched")
+        out += [f"refsubs line: {s}" for s in note.get("top_shingles", [])]
+    elif name == "synopsis" and note.get("terms"):
+        out.append("synopsis terms: " + ", ".join(map(str, note["terms"])))
+    elif name == "guests" and note.get("names"):
+        out.append("guests heard: " + ", ".join(map(str, note["names"])))
+    elif name == "titlecard":
+        out += [f"title card read: {r}" for r in note.get("readings", [])]
+    elif name == "llm":
+        if "p" in note:
+            out.append(f"llm: p={float(note['p']):.2f}")
+        out += [f"llm quote: {q}" for q in note.get("quotes", [])]
+        if note.get("quote_failed"):
+            out.append("llm: a quote failed verification")
+    return out
+
+
 def build_report(
     files: list[FileInfo],
     candidates: list[Candidate],
@@ -220,4 +242,4 @@ def render_tables(report: Report) -> str:
     return buf.getvalue()
 
 
-__all__ = ["build_report", "render_tables", "exit_code", "to_json", "format_odds"]
+__all__ = ["build_report", "render_tables", "exit_code", "to_json", "format_odds", "note_lines"]

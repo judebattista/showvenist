@@ -348,7 +348,7 @@ def _files_tree(files: list[Path], hcfg, tag_of):
         st = f.stat()
         tag = tag_of(f)
         node = FileNode(f, st.st_size, st.st_mtime, title_tag=tag,
-                        named=parse_named(f.name, hcfg.named_patterns))
+                        named=parse_named(f.name, hcfg.named_patterns), explicit=True)
         tref = parse_disc(tag, hcfg.disc_patterns) if tag else None
         if tref is not None:
             node.tag_disc = replace(tref, source="tag")
@@ -777,6 +777,7 @@ def identify(
         if hist_db is not None:
             hist = History(hist_db)
     reports = []
+    sessions = []
     for snode, num in jobs:
         sub = replace(tree, seasons=[snode])
         try:
@@ -846,11 +847,13 @@ def identify(
                 f"(e.g. {untagged[0].title_tag!r}); they are solved without disc blocks."
             )
         reports.append(report)
+        sessions.append(sess)
 
     if as_plan or do_apply:
         try:
             code = _plan_and_apply(reports, bundle, cfg, marker, hist, hist_db, do_apply,
-                                   confirm_token, interactive, exit_code, render_tables)
+                                   confirm_token, interactive, exit_code, render_tables,
+                                   sessions=sessions, show_slug=slug)
         finally:
             if hist_db is not None:
                 hist_db.close()
@@ -886,7 +889,8 @@ def _typed_yes(question: str) -> bool:
 
 def _plan_and_apply(reports, bundle, cfg, marker, hist, hist_db, do_apply: bool,
                     confirm_token: str | None,
-                    interactive: bool, exit_code, render_tables) -> int:
+                    interactive: bool, exit_code, render_tables, *, sessions=(),
+                    show_slug: str | None = None) -> int:
     """identify --plan / --apply (§4.3, decision 58): one plan per solved season, built by
     rename.plan.build_plan, printed in full; --apply moves through rename.movelog.apply_plan.
     --plan writes nothing: state.db is read only when it already exists (decision 60: it prints
@@ -900,6 +904,7 @@ def _plan_and_apply(reports, bundle, cfg, marker, hist, hist_db, do_apply: bool,
     from showvenist.rename.render import format_apply, format_plan, format_recovery
     from showvenist.rename.token import normalize_token, plan_token, save_last_token
     from showvenist.rename.types import PlanOptions
+    from showvenist.session import record_overrides
     from showvenist.state.db import StateDb, state_db_path
     from showvenist.state.history import History
 
@@ -954,6 +959,11 @@ def _plan_and_apply(reports, bundle, cfg, marker, hist, hist_db, do_apply: bool,
             db = StateDb.open_default()
         # one run row for the whole invocation, after consent (decision 59: nothing proposed)
         run = History(db).begin_run("identify --apply", " ".join(sys.argv[1:]))
+        # pins that overrode the tool's choice are negative labels (decision 61); the CLI
+        # has no pins, so this records nothing today
+        for sess in sessions:
+            if sess.pins:
+                record_overrides(History(db), sess, run.id, show_slug or sess.show_slug)
 
         def confirm_cross(ms) -> bool:
             # crossing filesystems copies and removes: always typed, never by --confirm alone

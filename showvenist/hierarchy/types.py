@@ -79,6 +79,9 @@ class FileNode:
     named: NamedEpisode | None = None
     ready: bool = True
     not_ready_reason: str | None = None
+    # given on the command line as a file, not found by walking a directory (§13.2: renamed
+    # where it is, never flattened)
+    explicit: bool = False
 
 
 @dataclass
