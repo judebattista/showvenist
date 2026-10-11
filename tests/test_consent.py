@@ -182,3 +182,81 @@ def test_over_budget_rounds_the_suggestion_up():
     msg = cli._over_budget(0.4201, 0)
     assert "estimated $0.4201 exceeds --budget 0." in msg and "--budget 0.43 " in msg
     assert "--budget 0.42 " in cli._over_budget(0.42, 0.1)
+
+
+# ---- --budget covers the whole invocation (M6 review) ------------------------------------------
+
+
+@pytest.fixture
+def fixed_cost(monkeypatch):
+    """Every season's LLM pass is estimated at, and costs, $0.60 (the fake client's own usage
+    is tiny, which would hide a per-season check)."""
+    from showvenist.scoring.llm import LlmScorer
+
+    real_score = LlmScorer.score
+
+    def score(self, files, ctx):
+        r = real_score(self, files, ctx)
+        self.total_cost_usd = 0.6
+        return r
+
+    monkeypatch.setattr(LlmScorer, "estimate_cost", lambda self, files, ctx: 0.6)
+    monkeypatch.setattr(LlmScorer, "score", score)
+    clients = []
+    monkeypatch.setattr(cli, "LLM_CLIENT_FACTORY",
+                        lambda: clients.append(FakeLlmClient()) or clients[-1])
+    return clients
+
+
+def _two_season_rips(tmp_path, monkeypatch):
+    from showvenist.bundle.store import bundle_path, save_bundle
+    from tests.test_cli_identify_eval import age
+    from tests.test_session import dialogue_for, make_episode_mkv, synth_bundle, write_refs
+
+    for var in ("XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME"):
+        monkeypatch.setenv(var, str(tmp_path / var))
+    monkeypatch.setattr(cli, "READINESS_SETTLE_SECONDS", 0.0)
+    root = tmp_path / "bundles"
+    slug_dir = bundle_path("synth-show-2000", root)
+    slug_dir.mkdir(parents=True)
+    save_bundle(write_refs(synth_bundle(seasons=2), slug_dir), root)
+    show = tmp_path / "rips" / "Synth Show"
+    lines = ["path,show,label,order,disc"]
+    for s in (1, 2):
+        for k, minutes in ((0, 8), (1, 11)):
+            p = make_episode_mkv(show / f"Season {s}" / f"t0{k}.mkv", minutes,
+                                 dialogue_for(k, s))
+            age(p)
+            lines.append(f"{p},synth-show-2000,S0{s}E0{k + 1},aired,")
+    manifest = tmp_path / "m.csv"
+    manifest.write_text("\n".join(lines) + "\n")
+    return root, show, manifest
+
+
+def test_identify_budget_is_cumulative_across_seasons(tmp_path, monkeypatch, no_real_llm,
+                                                      fixed_cost):
+    root, show, _ = _two_season_rips(tmp_path, monkeypatch)
+    r = runner.invoke(cli.app, ["identify", str(show), "--show", "synth-show-2000", "-o",
+                                str(root), "--json", "--llm", "all", "--budget", "1"])
+    # season 1 fits ($0.60 of $1); season 2's $0.60 does not fit the $0.40 left
+    assert r.exit_code == 1, r.output
+    assert r.stderr.count("LLM spend") == 1
+    assert "exceeds the $0.4000 that --budget 1 leaves after $0.6000 already spent" in r.stderr
+    assert "Re-run with --budget 1.20 " in r.stderr
+    assert len(fixed_cost) == 1
+    r = runner.invoke(cli.app, ["identify", str(show), "--show", "synth-show-2000", "-o",
+                                str(root), "--json", "--llm", "all", "--budget", "1.2"])
+    assert r.exit_code in (0, 2), r.output
+    assert r.stderr.count("LLM spend") == 2
+
+
+def test_eval_budget_is_cumulative_across_seasons(tmp_path, monkeypatch, no_real_llm,
+                                                  fixed_cost):
+    root, _, manifest = _two_season_rips(tmp_path, monkeypatch)
+    r = runner.invoke(cli.app, ["eval", str(manifest), "-o", str(root), "--llm", "all",
+                                "--budget", "1"])
+    assert r.exit_code == 1, r.output
+    assert "LLM not run for 1 season(s)" in r.stderr
+    assert "exceeds the $0.4000 that --budget 1 leaves after $0.6000 already spent" in r.stderr
+    assert "--budget 1.20 " in r.stderr
+    assert len(fixed_cost) == 1

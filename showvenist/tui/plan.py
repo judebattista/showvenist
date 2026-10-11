@@ -20,6 +20,7 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import Footer, OptionList, Static
 from textual.widgets.option_list import Option
 
+from showvenist.rename.render import format_recovery
 from showvenist.rename.token import plan_token
 from showvenist.rename.types import ApplyResult, Plan, PlannedMove
 from showvenist.tui.dialogs import ConfirmDialog
@@ -88,9 +89,11 @@ class PlanScreen(Screen[None]):
 
     def __init__(self, build: Callable[[set[Path]], Plans], exclude: set[Path],
                  can_apply: Callable[[], str | None],
-                 start_apply: Callable[[Plans, bool], None]):
+                 start_apply: Callable[[Plans, bool], None],
+                 applying: Callable[[], bool] = lambda: False):
         super().__init__()
         self.build = build
+        self.applying = applying  # an apply runs: the screen stays until its summary
         self.exclude = exclude  # the app's set: it survives leaving and reopening the screen
         self.can_apply = can_apply
         self.start_apply = start_apply
@@ -106,8 +109,20 @@ class PlanScreen(Screen[None]):
         yield Footer()
 
     def on_mount(self) -> None:
+        self.dupes_of = self._copies()
         self.rebuild()
         self.query_one(OptionList).focus()
+
+    def _copies(self) -> dict[Path, list[Path]]:
+        """Primary -> its `_dupe_N` copies, from the plan with nothing unticked, so a primary
+        unticked before this screen opened still brings its copies back when ticked."""
+        out: dict[Path, list[Path]] = {}
+        for _, plan in self.build(set()):
+            for i, m in enumerate(plan.moves):
+                copies = [c.old for c in plan.moves if c.primary == i]
+                if copies:
+                    out[m.old] = copies
+        return out
 
     # ---- content ------------------------------------------------------------------------
 
@@ -178,7 +193,15 @@ class PlanScreen(Screen[None]):
 
     # ---- keys ---------------------------------------------------------------------------
 
+    def _busy(self) -> bool:
+        if self.applying():
+            self.status("Applying: wait for the summary.")
+            return True
+        return False
+
     def action_toggle(self) -> None:
+        if self._busy():
+            return
         ol = self.query_one(OptionList)
         if ol.highlighted is None:
             return
@@ -187,17 +210,11 @@ class PlanScreen(Screen[None]):
             return
         path = Path(oid[2:])
         if oid.startswith("m:"):
-            dupes = []
-            for _, plan in self.plans:
-                idx = next((i for i, m in enumerate(plan.moves) if m.old == path), None)
-                if idx is not None:
-                    dupes += [m.old for m in plan.moves if m.primary == idx]
-            self.dupes_of[path] = dupes
             self.exclude.add(path)
-            self.exclude.update(dupes)
+            self.exclude.update(self.dupes_of.get(path, []))
         else:
             self.exclude.discard(path)
-            for d in self.dupes_of.pop(path, []):
+            for d in self.dupes_of.get(path, []):
                 self.exclude.discard(d)
         self.rebuild(keep=oid)
 
@@ -206,6 +223,8 @@ class PlanScreen(Screen[None]):
         self.action_apply()
 
     def action_apply(self) -> None:
+        if self._busy():
+            return
         why = self.can_apply()
         if why:
             self.status(why)
@@ -226,15 +245,24 @@ class PlanScreen(Screen[None]):
             if not cross:
                 self.start_apply(plans, False)
                 return
+            def second(ok: bool | None) -> None:
+                if ok is None:  # Esc: the whole apply is cancelled
+                    self.status("Nothing was moved.")
+                    return
+                self.start_apply(plans, ok)  # n: the other moves still run
+
             self.app.push_screen(ConfirmDialog(
                 f"{cross} move(s) cross filesystems: each file is copied, checked, and only "
-                "then removed from its old place. Move those too?"),
-                lambda ok: self.start_apply(plans, bool(ok)))
+                "then removed from its old place. Move those too?",
+                no_means="skip those, move the rest", escape_cancels="cancel, move nothing"),
+                second)
 
         self.app.push_screen(ConfirmDialog(
             f"Move {self.moves} file(s) as listed (plan {self.token})?"), first)
 
     def action_back(self) -> None:
+        if self._busy():
+            return
         self.dismiss(None)
 
 
@@ -245,6 +273,12 @@ def summary_text(results: list[tuple[str, ApplyResult]], recovery: str = "",
         lines.append(f"Not applied: {error}")
     run = next((r.run_id for _, r in results if r.run_id), None)
     for title, res in results:
+        rec = format_recovery(res.recovered)
+        if rec:
+            lines.append(f"{title}: {rec.rstrip()}")
+        if res.cancelled:
+            lines.append(f"{title}: cancelled, nothing moved")
+            continue
         lines.append(f"{title}: moved {len(res.done)} file(s), {len(res.failed)} failed")
         lines += [f"  {m.old.name} → {m.new}" for m in res.done]
         lines += [f"  FAILED {m.old}: {why}" for m, why in res.failed]

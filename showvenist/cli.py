@@ -852,6 +852,7 @@ def identify(
 
     reports = []
     sessions = []
+    llm_spent = 0.0  # --budget covers the whole invocation, every season together
     for snode, num in jobs:
         sess = make_session(snode, num)
         if len(jobs) > 1:
@@ -872,9 +873,10 @@ def identify(
                 est = scorer.estimate_cost(sess.files, sess.context())
                 typer.echo(f"LLM ({mode}): {len(scorer.send)} file(s) to send, estimated "
                            f"${est:.4f} (cached responses are free)", err=True)
-                if est > budget:
-                    _fail(_over_budget(est, budget))
+                if est > budget - llm_spent + 1e-12:
+                    _fail(_over_budget(est, budget, llm_spent))
                 sess.apply_llm(scorer)
+                llm_spent += scorer.total_cost_usd
                 typer.echo(f"LLM spend: ${scorer.total_cost_usd:.4f}", err=True)
         report = sess.report()
         report.notices += extra_notices(sess, snode)
@@ -924,11 +926,18 @@ def _review_tui(seasons, *, bundle, cfg, cache, marker, hist, budget: float, mod
     return run_review([SeasonInput(t, s, n) for t, s, n in seasons], opts)
 
 
-def _over_budget(est: float, budget: float) -> str:
+def _over_budget(est: float, budget: float, spent: float = 0.0) -> str:
+    """--budget covers every season of one invocation together (decision 60): `spent` is
+    what earlier seasons already spent, and the suggested budget covers it too."""
     import math
 
-    need = math.ceil(est * 100 - 1e-9) / 100
-    return (f"Not sending: estimated ${est:.4f} exceeds --budget {budget:g}. "
+    need = math.ceil((spent + est) * 100 - 1e-9) / 100
+    if spent <= 0:
+        return (f"Not sending: estimated ${est:.4f} exceeds --budget {budget:g}. "
+                f"Re-run with --budget {need:.2f} to allow these paid API calls.")
+    left = max(0.0, budget - spent)
+    return (f"Not sending: estimated ${est:.4f} exceeds the ${left:.4f} that --budget "
+            f"{budget:g} leaves after ${spent:.4f} already spent. "
             f"Re-run with --budget {need:.2f} to allow these paid API calls.")
 
 
@@ -1530,12 +1539,23 @@ def eval_cmd(
             typer.echo(f"[{done}/{total}] {path.name}" + (f"  ERROR {error}" if error else ""),
                        err=True)
 
+    # --budget covers the whole eval (every season, both runs of --compare-blocks): each
+    # season's estimate must fit what the seasons before it left
+    spend = {"spent": 0.0}
+
     def approve(est: float) -> bool:
-        return est <= budget
+        return est <= budget - spend["spent"] + 1e-12
+
+    def count_spend(g: GroupRun) -> None:
+        spend["spent"] += g.llm_cost_usd
+
+    def on_group_spend(g: GroupRun) -> None:
+        count_spend(g)
+        on_group(g)
 
     llm_factory = (lambda: _llm_scorer(cfg, cache)) if mode != "off" else None
     all_decisions, result = run_eval(
-        rows, bundles, cfg, dirs, cache, progress=progress, on_group=on_group,
+        rows, bundles, cfg, dirs, cache, progress=progress, on_group=on_group_spend,
         scorers=_scorers(sig), llm_mode=mode, llm_factory=llm_factory, approve=approve,
         use_blocks=not no_blocks, starting_order=start_order,
     )
@@ -1545,7 +1565,7 @@ def eval_cmd(
         # the second run re-reads the analysis cache the first one just filled
         typer.echo("comparison run without blocks", err=True)
         _, plain = run_eval(
-            rows, bundles, cfg, dirs, cache,
+            rows, bundles, cfg, dirs, cache, on_group=count_spend,
             scorers=_scorers(sig), llm_mode=mode, llm_factory=llm_factory, approve=approve,
             use_blocks=False, starting_order=start_order,
         )
@@ -1618,9 +1638,10 @@ def eval_cmd(
             typer.echo(f"wrote weights to {path}"
                        + ("" if llm_w else " ([weights.llm] left unchanged)"))
     if refused:
-        est = max(g.llm_estimate_usd for g in refused)  # the budget is checked per season
+        # the budget covers all seasons together: name what the refused ones need on top
+        est = sum(g.llm_estimate_usd for g in refused)
         _fail(f"LLM not run for {len(refused)} season(s). "
-              + _over_budget(est, budget).replace("Not sending: ", "", 1))
+              + _over_budget(est, budget, spend["spent"]).replace("Not sending: ", "", 1))
 
 
 if __name__ == "__main__":

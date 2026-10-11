@@ -91,6 +91,28 @@ def test_overridden_extra_pin(session, rips):  # noqa: F811
     assert d.kind == "episode" and d.episode.episode == 1
 
 
+def test_overridden_swapped_pins_report_the_unaided_choices(session, rips):  # noqa: F811
+    """The tool picks E03 for t00 and E01 for t01; pinning them the other way round lists both,
+    each with the tool's own episode (a solve per pin keeping the other pin gave 'extra')."""
+    sol = session.solve()
+    assert _assigned_label(sol, rips["e3"]) == "S01E03"
+    assert _assigned_label(sol, rips["e1"]) == "S01E01"
+    session.pin(rips["e3"], "S01E01")
+    session.pin(rips["e1"], "S01E03")
+    before = _state(session)
+    out = session.overridden()
+    assert set(out) == {rips["e3"], rips["e1"]}
+    assert out[rips["e3"]].kind == "episode" and out[rips["e3"]].episode.episode == 3
+    assert out[rips["e1"]].kind == "episode" and out[rips["e1"]].episode.episode == 1
+    assert _state(session) == before
+
+
+def _assigned_label(sol, path):
+    i = next(k for k, f in enumerate(sol.files) if f.path == path)
+    col = sol.assignment.column[i]
+    return "extra" if col < 0 else sol.candidates[col].label
+
+
 def test_record_overrides_writes_rejected_rows(session, rips):  # noqa: F811
     h = History(StateDb(":memory:"))
     session.solve()

@@ -526,3 +526,298 @@ def test_quit_during_analysis_and_help(work):
             await pilot.pause()
             assert app._cancel.is_set() and not app.is_running
     run(go())
+
+
+# ---- M6 review fixes ----------------------------------------------------------------------------
+
+
+class SlowLlmClient(FakeLlmClient):
+    def parse(self, **kw):
+        time.sleep(1.5)
+        return super().parse(**kw)
+
+
+def _spy_session(monkeypatch, app_ref):
+    """Record every Session.explain / solve call made on the UI (main) thread with the worker
+    that was running at the time."""
+    import threading
+
+    seen = []
+    orig_ex, orig_solve = Session.explain, Session.solve
+
+    def ex(self, *a, **k):
+        if threading.current_thread() is threading.main_thread():
+            seen.append(("explain", app_ref[0].worker))
+        return orig_ex(self, *a, **k)
+
+    def sv(self, *a, **k):
+        if threading.current_thread() is threading.main_thread():
+            seen.append(("solve", app_ref[0].worker))
+        return orig_solve(self, *a, **k)
+
+    monkeypatch.setattr(Session, "explain", ex)
+    monkeypatch.setattr(Session, "solve", sv)
+    return seen
+
+
+def test_ui_never_calls_session_while_the_llm_runs(work, monkeypatch):
+    app_ref = [None]
+    seen = _spy_session(monkeypatch, app_ref)
+
+    async def go():
+        app = make_app(work, client=SlowLlmClient(), budget=5.0)
+        app_ref[0] = app
+        async with app.run_test(size=WIDE) as pilot:
+            await ready(pilot, app)
+            await pilot.press("f")  # all files: rows never explained before
+            await pilot.press("l")
+            await pilot.pause(0.05)
+            assert app.worker == "llm"
+            for k in "jjjjkkjj":
+                await pilot.press(k)
+                await pilot.pause(0.02)
+            assert app.worker == "llm"
+            text = app.main.query_one(EvidencePane).text
+            assert "Waiting for the LLM call" in text or "Chosen:" in text
+            await until(pilot, lambda: app.worker is None)
+            assert "Chosen:" in app.main.query_one(EvidencePane).text
+    run(go())
+    assert not [s for s in seen if s[1] in ("llm", "apply")], seen
+
+
+def test_plan_screen_stays_and_ui_leaves_session_alone_during_apply(work, monkeypatch):
+    from showvenist.rename import movelog
+
+    app_ref = [None]
+    seen = _spy_session(monkeypatch, app_ref)
+    real = movelog.apply_plan
+
+    def slow(*a, **k):
+        time.sleep(2.0)
+        return real(*a, **k)
+
+    monkeypatch.setattr(movelog, "apply_plan", slow)
+
+    async def go():
+        app = make_app(work)
+        app_ref[0] = app
+        async with app.run_test(size=WIDE) as pilot:
+            await ready(pilot, app)
+            await pilot.press("x")
+            await pilot.press("p")
+            await pilot.press("enter")
+            await pilot.press("y")
+            await pilot.pause(0.05)
+            assert app.worker == "apply"
+            for k in ("escape", "q", "space", "ctrl+q"):
+                await pilot.press(k)
+                await pilot.pause(0.02)
+                assert isinstance(app.screen, PlanScreen), k
+                assert app.is_running
+            assert "wait for the summary" in str(app.screen.query_one("#plan-status").render())
+            await until(pilot, lambda: isinstance(app.screen, SummaryScreen))
+    run(go())
+    assert not [s for s in seen if s[1] in ("llm", "apply")], seen
+
+
+def test_ctrl_q_asks_about_pins_and_cancels_analysis(work):
+    async def go():
+        app = make_app(work)
+        async with app.run_test(size=WIDE) as pilot:
+            await ready(pilot, app)
+            await pilot.press("x")
+            await pilot.press("ctrl+q")
+            assert isinstance(app.screen, QuitDialog)
+            await pilot.press("ctrl+q")  # no second dialog
+            assert isinstance(app.screen, QuitDialog)
+            await pilot.press("s")
+            assert isinstance(app.screen, MainScreen) and app.is_running
+        app = make_app(work, seasons=(1, 2))
+        async with app.run_test(size=WIDE) as pilot:
+            await pilot.press("ctrl+q")  # nothing pending, analysis running: cancelled
+            await pilot.pause()
+            assert app._cancel.is_set() and not app.is_running
+    run(go())
+
+
+def test_auto_llm_budget_covers_both_seasons(work, monkeypatch):
+    """--llm all: each season costs $0.60 against --budget 1. The second season must see the
+    first one's spend even before the UI thread has handled its SeasonReady."""
+    class Fixed(LlmScorer):
+        def estimate_cost(self, files, ctx):
+            return 0.6
+
+        def score(self, files, ctx):
+            r = super().score(files, ctx)
+            self.total_cost_usd = 0.6
+            return r
+
+    # warm the analysis cache so the second season is analyzed at once
+    async def warm():
+        app = make_app(work, seasons=(1, 2))
+        async with app.run_test(size=WIDE) as pilot:
+            await ready(pilot, app)
+    run(warm())
+
+    real_ready = ReviewApp.on_season_ready
+
+    def late_ready(self, m):
+        if m.idx == 0:
+            time.sleep(1.0)  # the UI thread is slow: the worker goes on to season 2
+        return real_ready(self, m)
+
+    monkeypatch.setattr(ReviewApp, "on_season_ready", late_ready)
+
+    async def go():
+        app = make_app(work, seasons=(1, 2), budget=1.0)
+        app.opts.llm_mode = "all"
+        client = FakeLlmClient()
+        app.opts.llm_factory = lambda: Fixed(client)
+        async with app.run_test(size=WIDE) as pilot:
+            await ready(pilot, app)
+            assert app.llm_spent == pytest.approx(0.6)
+            assert "sent" in " ".join(app.seasons[0].llm_notices)
+            assert "Not sending" in " ".join(app.seasons[1].llm_notices)
+    run(go())
+
+
+def test_run_review_returns_1_on_a_crash(work, monkeypatch):
+    from showvenist.tui import app as tui_app
+
+    def boom(self):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(MainScreen, "on_mount", boom)
+    app = make_app(work)
+    seasons = [s.inp for s in app.seasons]
+    assert tui_app.run_review(seasons, app.opts, headless=True) == 1
+
+
+def _rejected():
+    with StateDb.open_default() as db:
+        return [tuple(r) for r in db.conn.execute(
+            "select episode_id, run_id from match where status='rejected'")]
+
+
+def test_overrides_recorded_once_and_only_for_applied_files(work, monkeypatch):
+    from showvenist.rename import movelog
+
+    real = movelog.apply_plan
+    calls = []
+
+    def refused_twice(*a, **k):
+        calls.append(1)
+        if len(calls) <= 2:
+            raise movelog.PlanRefused("refused for the test")
+        return real(*a, **k)
+
+    monkeypatch.setattr(movelog, "apply_plan", refused_twice)
+
+    async def apply(pilot, app):
+        await pilot.press("enter")
+        await pilot.press("y")
+        await until(pilot, lambda: isinstance(app.screen, SummaryScreen))
+        text = app.summary
+        await pilot.press("enter")
+        return text
+
+    async def go():
+        app = make_app(work)
+        async with app.run_test(size=WIDE) as pilot:
+            await ready(pilot, app)
+            low = tree(app).current.path
+            await pilot.press("e")
+            app.screen.query_one("#entry-input").value = "S01E04"  # the tool says extra
+            await pilot.press("enter")
+            await pilot.press("p")
+            _highlight(app.screen, f"m:{low}")
+            await pilot.press("space")  # unticked: its override is not recorded
+            assert "refused for the test" in await apply(pilot, app)
+            assert _rejected() == []
+            await pilot.press("p")
+            _highlight(app.screen, f"x:{low}")
+            await pilot.press("space")  # ticked again: recorded with the (refused) run
+            assert "refused for the test" in await apply(pilot, app)
+            assert _rejected() == [(None, 1)]
+            await pilot.press("p")
+            assert "Run 1." in await apply(pilot, app)  # the retry records nothing more
+            assert _rejected() == [(None, 1)]
+    run(go())
+
+
+def test_escape_at_cross_filesystem_confirm_cancels_everything(work):
+    _, _, show = work
+    s1 = show / "Season 1"
+    dev = {"device": lambda p: 2 if "Disc 2" in str(p) else 1}
+
+    async def go():
+        app = make_app(work, plan_kwargs=dev)
+        async with app.run_test(size=WIDE) as pilot:
+            await ready(pilot, app)
+            await pilot.press("p")
+            await pilot.press("enter")
+            await pilot.press("y")
+            assert isinstance(app.screen, ConfirmDialog)
+            hint = str(app.screen.query_one("#confirm-hint").render())
+            assert "n skip those, move the rest" in hint and "Esc cancel" in hint
+            await pilot.press("escape")
+            await pilot.pause()
+            assert isinstance(app.screen, PlanScreen) and app.worker is None
+            assert "Nothing was moved" in str(app.screen.query_one("#plan-status").render())
+            assert (s1 / "Disc 1" / "t00.mkv").exists()  # same-fs moves did not run either
+            assert not app.applied
+    run(go())
+
+
+def test_reopened_plan_reticks_copies_with_their_primary(work):
+    _, _, show = work
+    s1 = show / "Season 1"
+    e1, dupe = s1 / "Disc 1" / "t00.mkv", s1 / "Disc 2" / "t03.mkv"
+
+    async def go():
+        app = make_app(work)
+        async with app.run_test(size=WIDE) as pilot:
+            await ready(pilot, app)
+            await pilot.press("p")
+            _highlight(app.screen, f"m:{e1}")
+            await pilot.press("space")
+            assert {e1, dupe} <= app.exclude
+            await pilot.press("escape")
+            await pilot.press("p")
+            screen = app.screen
+            assert isinstance(screen, PlanScreen)
+            _highlight(screen, f"x:{e1}")
+            await pilot.press("space")
+            ids = _opt_ids(screen)
+            assert f"m:{e1}" in ids and f"m:{dupe}" in ids and not app.exclude
+    run(go())
+
+
+def test_escape_undo_switches_to_the_pins_tab(work):
+    async def go():
+        app = make_app(work, seasons=(1, 2))
+        async with app.run_test(size=WIDE) as pilot:
+            await ready(pilot, app)
+            await pilot.press("x")
+            assert app.seasons[0].session.pins
+            await pilot.press("right")
+            await pilot.pause()
+            assert app.active == 1
+            await pilot.press("escape")
+            await pilot.pause()
+            assert app.active == 0 and not app.seasons[0].session.pins
+            assert "Season 1" in str(app.main.query_one("#title").render())
+            assert "Undid the last change" in status(app)
+    run(go())
+
+
+def test_summary_shows_recovery_and_cancelled():
+    from showvenist.rename.types import ApplyResult, RecoveryReport
+    from showvenist.tui.plan import summary_text
+
+    rec = RecoveryReport(removed_partials=[Path("/x/a.showvenist-partial")])
+    text = summary_text([("Season 1", ApplyResult(run_id=0, recovered=rec, cancelled=True)),
+                         ("Season 2", ApplyResult(run_id=3))])
+    assert "Season 1: Recovered from an earlier interrupted run" in text
+    assert "Season 1: cancelled, nothing moved" in text
+    assert "Season 2: moved 0 file(s), 0 failed" in text and "Run 3." in text

@@ -84,27 +84,37 @@ class EpisodeEntry(ModalScreen[str | None]):
         self.dismiss(None)
 
 
-class ConfirmDialog(ModalScreen[bool]):
-    """y/n question."""
+class ConfirmDialog(ModalScreen[bool | None]):
+    """y/n question. Esc answers no, or, with `escape_cancels`, dismisses with None (cancel
+    everything) and the hint says what n and Esc each do."""
 
     DEFAULT_CSS = DIALOG_CSS
     BINDINGS = [
         Binding("y", "answer(True)", "Yes"),
         Binding("n", "answer(False)", "No"),
-        Binding("escape", "answer(False)", "No", show=False),
+        Binding("escape", "escape", "No", show=False),
     ]
 
-    def __init__(self, question: str):
+    def __init__(self, question: str, *, no_means: str = "no",
+                 escape_cancels: str | None = None):
         super().__init__()
         self.question = question
+        self.no_means = no_means
+        self.escape_cancels = escape_cancels
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="dialog"):
             yield Static(self.question, id="confirm-question")
-            yield Static("y yes · n no")
+            hint = f"y yes · n {self.no_means}"
+            if self.escape_cancels:
+                hint += f" · Esc {self.escape_cancels}"
+            yield Static(hint, id="confirm-hint")
 
     def action_answer(self, yes: bool) -> None:
         self.dismiss(yes)
+
+    def action_escape(self) -> None:
+        self.dismiss(None if self.escape_cancels else False)
 
 
 class QuitDialog(ModalScreen[str]):

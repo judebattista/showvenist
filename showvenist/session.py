@@ -1159,18 +1159,20 @@ class Session:
         return self.solve()
 
     def overridden(self) -> dict[Path, Decision | None]:
-        """For each pinned file whose pin differs from what a solve without that one pin picks,
-        that decision (§12.4). Pins that agree with the tool are left out. Session state (pins,
-        last solution, ordering choice and caches) is unchanged afterwards."""
+        """For each pinned file whose pin differs from the tool's unaided choice, that choice
+        (§12.4). The unaided choice is the decision from one solve with no pins at all, so
+        swapped pins each record what the tool picked for that file. Pins that agree with it
+        are left out. Session state (pins, last solution, ordering choice and caches) is
+        unchanged afterwards."""
         if not self.pins:
             return {}
         saved = (dict(self.pins), self.solution, self._choice, self.ordering, self.candidates,
                  dict(self._evid), dict(self._oos), set(self._window_failed))
         out: dict[Path, Decision | None] = {}
         try:
+            self.pins = {}
+            sol = self.solve()
             for path, eid in saved[0].items():
-                self.pins = {p: e for p, e in saved[0].items() if p != path}
-                sol = self.solve()
                 i = self._index(path)
                 got = _decision(sol.assignment.column[i], sol.candidates)
                 same = (got.kind == "extra") if eid is None else (
@@ -1508,14 +1510,16 @@ class Session:
         return self._plain_row(n.info, "episode", ref, flags, high=True)
 
 
-def record_overrides(hist, sess: Session, run_id: int | None, show_slug: str) -> int:
+def record_overrides(hist, sess: Session, run_id: int | None, show_slug: str,
+                     only: set[Path] | None = None) -> int:
     """Record what the tool would have chosen for each pin that overrides it as a `rejected`
     match in `hist` (§7.2, decision 61); returns how many. A pin equal to the tool's own top
-    choice records nothing. Nothing is recorded when the session has no pins."""
+    choice records nothing. Nothing is recorded when the session has no pins. With `only`,
+    pins on other files are left out (the TUI passes the files of the plan it applies)."""
     n = 0
     files = {f.path: f for f in sess.files}
     for path, d in sess.overridden().items():
-        if d is None or path not in files:
+        if d is None or path not in files or (only is not None and path not in only):
             continue
         ep = d.episode
         f = files[path]

@@ -96,6 +96,9 @@ class SeasonState:
     pre_pin: dict[Path, str] = field(default_factory=dict)  # level before the user's pin
     error: str | None = None
     llm_notices: list[str] = field(default_factory=list)
+    # copies of Session state the UI reads while a worker may be using the Session
+    pinned: set[Path] = field(default_factory=set)
+    details: dict[Path, Any] = field(default_factory=dict)  # explain() results of this solve
     # read once, before any worker runs: the UI never reads the Session while it is analyzed
     season_node: Any = None
     ignored: list[Path] = field(default_factory=list)
@@ -273,7 +276,7 @@ class MainScreen(Screen[None]):
 
     def update_title(self) -> None:
         st = self.st
-        ordering = st.session.ordering if st.finished else st.ordering
+        ordering = st.ordering  # refreshed after each solve: the Session may be busy
         o = self.r.opts.bundle.orderings.get(ordering)
         order = (o.name if o is not None and o.name else ordering) + " order"
         state = {
@@ -307,10 +310,7 @@ class MainScreen(Screen[None]):
             return
         detail, msg = None, row.inert_reason
         if row.actionable:
-            try:
-                detail = st.session.explain(row.path)
-            except (ValueError, KeyError) as e:
-                msg = str(e)
+            detail, msg = self.r.explain(self.r.active, row.path)
         pane.show(render_detail(row.report, detail, row.path, msg, notices))
 
     def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
@@ -378,11 +378,14 @@ class MainScreen(Screen[None]):
         row = self._actionable()
         if row is None:
             return
-        try:
-            cands = self.st.session.explain(row.path).candidates
-        except (ValueError, KeyError) as e:
-            self.status(str(e))
+        if self.r.blocked(self.r.active, "accept"):
+            self.status(self.r.busy_reason(self.r.active) or "Not now.")
             return
+        detail, msg = self.r.explain(self.r.active, row.path)
+        if detail is None:
+            self.status(msg or "No candidates.")
+            return
+        cands = detail.candidates
         if k >= len(cands):
             self.status(f"There is no candidate {'abc'[k]}.")
             return
@@ -453,6 +456,8 @@ class MainScreen(Screen[None]):
 
 class ReviewApp(App[int]):
     TITLE = "showvenist"
+    # every way out goes through request_quit (pending pins, the running apply, cancelling the
+    # analysis): Textual's own ctrl+q binding calls action_quit, overridden below
 
     def __init__(self, seasons: list[SeasonInput], opts: ReviewOptions):
         super().__init__()
@@ -463,12 +468,16 @@ class ReviewApp(App[int]):
         self.message = ""
         self.worker: str | None = None  # analysis | llm | apply
         self.analyzing: int | None = None
-        self.llm_spent = 0.0
+        # LLM spend of this invocation, against --budget: written by the workers that spent it
+        # (in their thread, under the lock), so a later season's check sees it at once
+        self._spend_lock = threading.Lock()
+        self._llm_spent = 0.0
         self.last_pin: tuple[int, Path, bool, str | None] | None = None
         self.exclude: set[Path] = set()
         self.plan_pending = False  # a plan with moves was shown and not applied
         self.applied = False
         self.run_id: int | None = None
+        self.overrides_recorded: set[Path] = set()  # pins already written as `rejected`
         self.recovery = ""
         self.summary = ""
         self._cancel = threading.Event()
@@ -504,6 +513,15 @@ class ReviewApp(App[int]):
             db.close()
         if self.recovery:
             self.message = self.recovery.strip().splitlines()[0]
+
+    @property
+    def llm_spent(self) -> float:
+        with self._spend_lock:
+            return self._llm_spent
+
+    def _spend(self, usd: float) -> None:
+        with self._spend_lock:
+            self._llm_spent += usd
 
     def _view(self) -> MainScreen | None:
         return self.main if self.main is not None and self.main.is_mounted else None
@@ -549,9 +567,13 @@ class ReviewApp(App[int]):
         if not scorer.send:
             return [], 0.0
         est = scorer.estimate_cost(sess.files, sess.context())
-        if est > self.opts.budget - self.llm_spent + 1e-12:
-            return [f"LLM ({mode}): " + over_budget(est, self.llm_spent, self.opts.budget)], 0.0
-        sess.apply_llm(scorer)
+        spent = self.llm_spent  # includes every earlier season: added below, in this thread
+        if est > self.opts.budget - spent + 1e-12:
+            return [f"LLM ({mode}): " + over_budget(est, spent, self.opts.budget)], 0.0
+        try:
+            sess.apply_llm(scorer)
+        finally:
+            self._spend(scorer.total_cost_usd)
         return [f"LLM ({mode}): sent {len(scorer.send)} file(s), spent "
                 f"${scorer.total_cost_usd:.4f}"], scorer.total_cost_usd
 
@@ -575,8 +597,7 @@ class ReviewApp(App[int]):
 
     def on_season_ready(self, m: SeasonReady) -> None:
         st = self.seasons[m.idx]
-        self.llm_spent += m.spent
-        st.llm_notices = m.notices
+        st.llm_notices = m.notices  # the spend was counted by the worker
         if m.error is not None:
             st.status, st.error = "failed", m.error
         else:
@@ -616,6 +637,31 @@ class ReviewApp(App[int]):
                    "apply wait for it."
         return ""
 
+    def session_busy(self, idx: int) -> bool:
+        """True while a worker may be using season `idx`'s Session: the UI must not call it."""
+        st = self.seasons[idx]
+        return (self.worker in ("llm", "apply") or not st.finished
+                or (self.worker == "analysis" and self.analyzing == idx))
+
+    def explain(self, idx: int, path: Path) -> tuple[Any, str | None]:
+        """(FileDetail or None, message) for the evidence pane. Each solve's details are
+        cached; while a worker runs, only the cache is read (never the Session)."""
+        st = self.seasons[idx]
+        got = st.details.get(path)
+        if got is not None:
+            return (None, got) if isinstance(got, str) else (got, None)
+        if self.session_busy(idx):
+            what = {"llm": "the LLM call", "apply": "the apply"}.get(self.worker or "",
+                                                                     "the analysis")
+            return None, f"Waiting for {what} to finish: the evidence shows when it ends."
+        try:
+            detail = st.session.explain(path)
+        except (ValueError, KeyError) as e:
+            st.details[path] = str(e)
+            return None, str(e)
+        st.details[path] = detail
+        return detail, None
+
     def blocked(self, idx: int, action: str) -> bool:
         st = self.seasons[idx]
         if self.worker in ("llm", "apply") or not st.finished:
@@ -631,8 +677,10 @@ class ReviewApp(App[int]):
     def _rebuild(self, idx: int) -> None:
         st = self.seasons[idx]
         st.report = self._report(idx)
-        pinned = set(st.session.pins)
-        st.rows = build_rows(st.report, st.pre_pin, pinned)
+        st.pinned = set(st.session.pins)
+        st.ordering = st.session.ordering
+        st.details.clear()
+        st.rows = build_rows(st.report, st.pre_pin, st.pinned)
 
     def _primary(self, sess: Session, path: Path) -> Path:
         return sess.duplicates.get(path, path)
@@ -701,6 +749,10 @@ class ReviewApp(App[int]):
         except (ValueError, KeyError) as e:
             return str(e)
         self.last_pin = None
+        if idx != self.active:  # the undone pin is on another tab: show it
+            self.active = idx
+            if self._view() is not None:
+                self.main.query_one("#tabs", Tabs).active = f"season-{idx}"  # type: ignore[union-attr]
         self._after_change(idx)
         self.message = f"Undid the last change to {path.name}."
         if self._view() is not None:
@@ -737,13 +789,14 @@ class ReviewApp(App[int]):
         try:
             self.seasons[idx].session.apply_llm(scorer)
         except Exception as e:  # noqa: BLE001
+            self._spend(scorer.total_cost_usd)
             self.post_message(LlmDone(idx, scorer.total_cost_usd, f"{type(e).__name__}: {e}"))
             return
+        self._spend(scorer.total_cost_usd)
         self.post_message(LlmDone(idx, scorer.total_cost_usd, None))
 
     def on_llm_done(self, m: LlmDone) -> None:
         self.worker = "analysis" if self.analyzing is not None else None
-        self.llm_spent += m.spent
         self._after_change(m.idx)
         self.message = (f"LLM failed: {m.error}" if m.error else
                         f"LLM answered (spent ${m.spent:.4f}, ${self.llm_spent:.4f} so far).")
@@ -787,7 +840,7 @@ class ReviewApp(App[int]):
             self.main.status("Already applied: run identify again.")  # type: ignore[union-attr]
             return
         screen = PlanScreen(self.build_plans, self.exclude, self.apply_blocked,
-                            self.start_apply)
+                            self.start_apply, applying=lambda: self.worker == "apply")
 
         def closed(_=None) -> None:
             if not self.applied:
@@ -823,10 +876,15 @@ class ReviewApp(App[int]):
             hist = History(db)
             if self.run_id is None:
                 self.run_id = hist.begin_run("identify", self.opts.command_args).id
+            # overrides only for files in the plan being applied (not unticked or left out),
+            # each once even when the apply is retried after a refusal
+            in_plan = {m.old for _, p in plans for m in p.moves if m.kind != "sidecar"}
             for i in self.finished():
                 sess = self.seasons[i].session
-                if sess.pins:
-                    record_overrides(hist, sess, self.run_id, sess.show_slug)
+                only = {p for p in sess.pins if p in in_plan} - self.overrides_recorded
+                if only:
+                    record_overrides(hist, sess, self.run_id, sess.show_slug, only=only)
+                    self.overrides_recorded |= only
             for title, plan in plans:
                 if not plan.moves:
                     continue
@@ -863,7 +921,7 @@ class ReviewApp(App[int]):
     # ---- quit -----------------------------------------------------------------------------
 
     def pending(self) -> str | None:
-        pins = sum(len(s.session.pins) for s in self.seasons if s.finished)
+        pins = sum(len(s.pinned) for s in self.seasons if s.finished)
         what = []
         if pins:
             what.append(f"{pins} pin{'s' if pins != 1 else ''}")
@@ -871,19 +929,34 @@ class ReviewApp(App[int]):
             what.append("an unapplied plan")
         return " and ".join(what) or None
 
+    async def action_quit(self) -> None:
+        """ctrl+q (Textual's binding) asks like q does."""
+        self.request_quit()
+
+    def _say(self, text: str) -> None:
+        if isinstance(self.screen, PlanScreen):
+            self.screen.status(text)
+        elif self._view() is not None:
+            self.main.status(text)  # type: ignore[union-attr]
+
     def request_quit(self) -> None:
+        """Every way out: asks about pending pins or plan, never quits during an apply, and
+        cancels the analysis when it quits."""
         if self.worker == "apply":
-            self.main.status("Files are being moved: wait for the summary.")  # type: ignore[union-attr]
+            self._say("Files are being moved: wait for the summary.")
+            return
+        if isinstance(self.screen, QuitDialog):
             return
         what = None if self.applied else self.pending()
         if what is None:
             self.quit_now()
             return
+        on_plan = isinstance(self.screen, PlanScreen)
 
         def answer(choice: str | None) -> None:
             if choice == "discard":
                 self.quit_now()
-            elif choice == "apply":
+            elif choice == "apply" and not on_plan:
                 self.open_plan()
 
         self.push_screen(QuitDialog(what), answer)
@@ -894,9 +967,13 @@ class ReviewApp(App[int]):
         self.exit(0)
 
 
-def run_review(seasons: list[SeasonInput], opts: ReviewOptions) -> int:
-    """Run the TUI; returns the exit code."""
-    code = ReviewApp(seasons, opts).run()
+def run_review(seasons: list[SeasonInput], opts: ReviewOptions, **run_kwargs: Any) -> int:
+    """Run the TUI; returns the exit code: 1 when the app crashed (§4.5)."""
+    app = ReviewApp(seasons, opts)
+    code = app.run(**run_kwargs)
+    rc = app.return_code
+    if rc is None or rc != 0:
+        return 1 if rc is None else int(rc)
     return 0 if code is None else int(code)
 
 
