@@ -316,6 +316,15 @@ def _interactive() -> bool:
         return False
 
 
+def _use_tui() -> bool:
+    """The review TUI needs a real terminal on both ends (checked on its own, so tests that
+    pretend to be interactive for the startup prompts still get the report)."""
+    try:
+        return sys.stdin.isatty() and sys.stdout.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
 def _tag_reader(cache) -> Callable[[Path], str | None]:
     """The MKV title tag (§5.1) via the cached probe; None when the file can't be probed."""
     from showvenist.analysis.probe import probe
@@ -607,7 +616,7 @@ def identify(
         False, "--reanalyze", help="Ignore files already confirmed in history (analyze them again)"
     ),
     as_report: bool = typer.Option(
-        False, "--report", help="Print the report (the default: no review TUI yet)"
+        False, "--report", help="Print the report instead of opening the review TUI"
     ),
     as_json: bool = typer.Option(
         False, "--json",
@@ -632,7 +641,8 @@ def identify(
     """Identify files against a show's bundle (report mode never touches the media).
 
     PATHS may be files or Show / Season / Disc folders (§5). The parsed tree is printed to
-    stderr before analysis. Each season in the tree is solved on its own and reported.
+    stderr before analysis. On a terminal (without --report, --json, --plan or --apply) the
+    review TUI opens. Each season in the tree is solved on its own and reported.
     --plan adds the move list (§13) and writes nothing; --apply moves the files after a typed
     yes (or with --confirm), with a move log that `showvenist undo` reverses."""
     import json as _json
@@ -776,9 +786,7 @@ def identify(
             typer.echo(f"identify: history ignored: {e}", err=True)
         if hist_db is not None:
             hist = History(hist_db)
-    reports = []
-    sessions = []
-    for snode, num in jobs:
+    def make_session(snode, num):
         sub = replace(tree, seasons=[snode])
         try:
             sess = Session(
@@ -791,6 +799,61 @@ def identify(
             _fail(f"identify: {e}")
         if marker is not None:
             sess.language = marker.language  # the rips' subtitle language (§5.4)
+        return sess
+
+    def extra_notices(sess, snode) -> list[str]:
+        """The notices identify adds to each season's report (TUI and report mode alike)."""
+        out = []
+        if mode == "off" and not has_refs:
+            out.append(
+                "No reference subtitles and the LLM is off: nearly every file will need "
+                "review. Add reference subtitles with `showvenist ingest --subs DIR`, or use "
+                "`--llm auto --budget N` (the estimated cost is printed first)."
+            )
+        if allow_duplicates and not sess.near:
+            out.append(
+                "--allow-duplicates: no near duplicates (same dialogue, different bytes) found; "
+                "exact copies are reported as duplicates of their first copy either way."
+            )
+        if folder_hint is not None:
+            out.append(
+                f"Suggestion (not applied): rename the show folder {show_dir.name!r} to "
+                f"{folder_hint!r} so Jellyfin uses the same TMDB entry."
+            )
+        if wrote_marker is not None:
+            out.append(f"Wrote the marker file {wrote_marker}.")
+        elif marker is None and source in ("name", "pick", "tmdbid-hint"):
+            out.append(
+                f"Show resolved from the folder ({source}) as {slug!r}; no marker file was "
+                "written."
+            )
+        out += [f"Folder and title tag disagree (the folder wins): {d}"
+                for d in tree.disagreements]
+        untagged = [f for f in snode.loose if f.title_tag and f.tag_disc is None]
+        if untagged:
+            n = len(untagged)
+            out.append(
+                f"{n} file{'s have' if n != 1 else ' has'} a title tag that names no disc "
+                f"(e.g. {untagged[0].title_tag!r}); they are solved without disc blocks."
+            )
+        return out
+
+    if interactive and not do_apply and _use_tui():  # §12.2: a TTY, no output flag
+        try:
+            code = _review_tui(
+                [(_season_title(num), make_session(snode, num),
+                  lambda s, sn=snode: extra_notices(s, sn)) for snode, num in jobs],
+                bundle=bundle, cfg=cfg, cache=cache, marker=marker, hist=hist, budget=budget,
+                mode=mode, show_title=bundle.show.title)
+        finally:
+            if hist_db is not None:
+                hist_db.close()
+        raise typer.Exit(code)
+
+    reports = []
+    sessions = []
+    for snode, num in jobs:
+        sess = make_session(snode, num)
         if len(jobs) > 1:
             typer.echo(f"-- {_season_title(num)}", err=True)
         sess.analyze(None, progress=progress)
@@ -814,38 +877,7 @@ def identify(
                 sess.apply_llm(scorer)
                 typer.echo(f"LLM spend: ${scorer.total_cost_usd:.4f}", err=True)
         report = sess.report()
-        if mode == "off" and not has_refs:
-            report.notices.append(
-                "No reference subtitles and the LLM is off: nearly every file will need "
-                "review. Add reference subtitles with `showvenist ingest --subs DIR`, or use "
-                "`--llm auto --budget N` (the estimated cost is printed first)."
-            )
-        if allow_duplicates and not sess.near:
-            report.notices.append(
-                "--allow-duplicates: no near duplicates (same dialogue, different bytes) found; "
-                "exact copies are reported as duplicates of their first copy either way."
-            )
-        if folder_hint is not None:
-            report.notices.append(
-                f"Suggestion (not applied): rename the show folder {show_dir.name!r} to "
-                f"{folder_hint!r} so Jellyfin uses the same TMDB entry."
-            )
-        if wrote_marker is not None:
-            report.notices.append(f"Wrote the marker file {wrote_marker}.")
-        elif marker is None and source in ("name", "pick", "tmdbid-hint"):
-            report.notices.append(
-                f"Show resolved from the folder ({source}) as {slug!r}; no marker file was "
-                "written."
-            )
-        report.notices += [f"Folder and title tag disagree (the folder wins): {d}"
-                           for d in tree.disagreements]
-        untagged = [f for f in snode.loose if f.title_tag and f.tag_disc is None]
-        if untagged:
-            n = len(untagged)
-            report.notices.append(
-                f"{n} file{'s have' if n != 1 else ' has'} a title tag that names no disc "
-                f"(e.g. {untagged[0].title_tag!r}); they are solved without disc blocks."
-            )
+        report.notices += extra_notices(sess, snode)
         reports.append(report)
         sessions.append(sess)
 
@@ -872,6 +904,24 @@ def identify(
                 typer.echo(f"== {_season_title(r.season)} ==")
             typer.echo(render_tables(r))
     raise typer.Exit(_final_exit_code(done, exit_code))
+
+
+def _review_tui(seasons, *, bundle, cfg, cache, marker, hist, budget: float, mode: str,
+                show_title: str) -> int:
+    """Open the review TUI (§12.2) on the seasons' sessions, not yet analyzed: the TUI
+    analyzes them in the background. Startup questions were asked before this."""
+    from showvenist.rename.types import PlanOptions
+    from showvenist.tui.app import ReviewOptions, SeasonInput, run_review
+
+    opts = ReviewOptions(
+        bundle=bundle, show_title=show_title,
+        plan_options=PlanOptions(
+            naming_order=marker.naming_order if marker is not None else None,
+            template=cfg.naming.template, move_extras=cfg.naming.move_extras),
+        history=hist, budget=budget, llm_mode=mode,
+        llm_factory=lambda: _llm_scorer(cfg, cache), command_args=" ".join(sys.argv[1:]),
+    )
+    return run_review([SeasonInput(t, s, n) for t, s, n in seasons], opts)
 
 
 def _over_budget(est: float, budget: float) -> str:

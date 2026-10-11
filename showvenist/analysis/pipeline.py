@@ -215,8 +215,8 @@ def analyze_files(
             for f in as_completed(futs):
                 report(futs[f])
         finally:
-            for ex in execs.values():
-                ex.shutdown(wait=True)
+            for ex in execs.values():  # queued files are dropped when a caller stops early
+                ex.shutdown(wait=True, cancel_futures=True)
     finally:
         pipe.ocr_pool.shutdown(wait=True)
     return results
