@@ -533,7 +533,7 @@ Location: `$XDG_DATA_HOME/showvenist/state.db`. SQLite through the standard libr
 | `media_file` | `fingerprint` PK, `content_key`, `size`, `last_path`, `show_slug`, `season_label`, `disc_label`, `first_seen`, `last_seen` | Known files. `disc_label` survives flattening, so blocks from earlier discs can still constrain later ones. |
 | `run` | `id`, `started_at`, `command`, `args` | One row per `identify` / `assign` / `undo` invocation |
 | `match` | `id`, `fingerprint`, `show_slug`, `episode_id` (NULL = extra), `season`, `episode`, `title`, `status` (`confirmed`/`rejected`/`undone`), `source` (`auto`/`manual`/`name`), `confidence`, `margin`, `bundle_revision`, `run_id`, `created_at` | Match history. S/E/title are stored as they were at the time, so records survive bundle changes. |
-| `rename_op` | `id`, `run_id`, `fingerprint`, `old_path`, `new_path`, `status` (`planned`/`done`/`undone`), `applied_at`, `undone_at` | The move log, written before each move (§13.4); also drives `undo` |
+| `rename_op` | `id`, `run_id`, `fingerprint`, `kind` (`episode`/`extra`/`duplicate`/`sidecar`), `old_path`, `new_path`, `status` (`planned`/`done`/`undone`), `match_id`, `show_slug`, `episode_id`, `dupe_index`, what the move decides (`season`, `episode`, `title`, `match_source`, `confidence`, `bundle_revision`, `disc_label`, `prior_match`; nullable, schema v2), `cross_fs`, `applied_at`, `undone_at` | The move log, written before each move (§13.4) with the decision it carries, so recovery can confirm the match after the plan is gone; also drives `undo` |
 
 Lifecycle:
 
@@ -942,11 +942,13 @@ Each move is journaled in `rename_op`:
 2. `rename()`;
 3. mark it `done` and confirm the match.
 
-Whenever a command that could move files starts (`identify --apply`, `assign --rename`, `undo`), leftover `planned` rows are checked against which path actually exists, then marked `done` or rolled back. If neither the old nor the new path exists, the row stays `planned` and is reported; nothing is guessed.
+Right before each video moves it is fingerprinted again; a file that changed since planning is not moved. A duplicate is renamed only after its primary's move succeeded.
+
+Whenever a command that could move files starts (`identify --apply`, `assign --rename`, `undo`), leftover `planned` rows are checked against which path actually exists, then marked `done` (and the match confirmed from the row) or rolled back. If neither the old nor the new path exists, or both do, the row stays `planned` and is reported; nothing is guessed. The one exception is an interrupted cross-filesystem move whose copy verifies against the original and the logged fingerprint: recovery finishes it by removing the original. Our own partial copy (`.<name>.showvenist-partial`) of a `planned` row is removed while its original still exists.
 
 ### 13.5 Undo
 
-`undo [--last | RUN_ID]` lists a run's `done` moves, asks for confirmation, and moves the files back in reverse order. The run's confirmed matches become `undone` (§7.2). A move whose file is no longer at the logged path (you moved or renamed it afterward), or whose old path is now occupied, is skipped and reported; the rest of the run is still undone. Nothing is overwritten. In-place `dupe_X` renames are undone like any other move.
+`undo [--last | RUN_ID]` lists a run's `done` moves, asks for confirmation, and moves the files back in reverse order, each video before its sidecars (a sidecar stays with a video that cannot go back). `--last` is the latest run with `done` moves that has not been undone before, so a run whose undo skipped some moves is retried only by its RUN_ID. The run's confirmed matches become `undone` (§7.2). A move whose file is no longer at the logged path (you moved or renamed it afterward), or whose old path is now occupied, is skipped and reported; the rest of the run is still undone. A file already back at its old path counts as undone. Nothing is overwritten. In-place `dupe_X` renames are undone like any other move.
 
 ---
 

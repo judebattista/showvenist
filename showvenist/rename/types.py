@@ -47,6 +47,9 @@ class PlannedMove:
     # and writes no new one, so undoing this run never undoes an earlier decision
     confirmed: bool = False
     disc: str | None = None  # disc label from the report: kept in media_file (survives flattening)
+    # index into Plan.moves of the primary copy a `duplicate` belongs to; apply renames the
+    # copy only when that move happened (None: the primary is already in place, no move)
+    primary: int | None = None
 
 
 @dataclass(frozen=True)
@@ -98,7 +101,19 @@ class ApplyResult:
 class RecoveryReport:
     completed: list[RenameOp] = field(default_factory=list)  # planned -> done (target exists)
     rolled_back: list[RenameOp] = field(default_factory=list)  # planned dropped (source exists)
-    unresolved: list[RenameOp] = field(default_factory=list)  # neither path exists: left planned
+    # left planned: neither path exists, both exist and the copy cannot be verified, or the
+    # target holds another file. Each with the reason, in `notes`
+    unresolved: list[RenameOp] = field(default_factory=list)
+    # completed moves whose match could not be recorded (a row journaled before schema v2, or
+    # the file was decided again by a later run)
+    unconfirmed: list[RenameOp] = field(default_factory=list)
+    removed_partials: list[Path] = field(default_factory=list)  # our own .showvenist-partial
+    notes: list[str] = field(default_factory=list)  # one line per unresolved or unusual row
+
+    @property
+    def empty(self) -> bool:
+        return not (self.completed or self.rolled_back or self.unresolved
+                    or self.removed_partials)
 
 
 @dataclass
@@ -107,3 +122,4 @@ class UndoResult:
     undone: list[RenameOp] = field(default_factory=list)
     skipped: list[tuple[RenameOp, str]] = field(default_factory=list)  # file gone / old path taken
     cancelled: bool = False
+    recovered: RecoveryReport | None = None  # leftovers reconciled before the undo

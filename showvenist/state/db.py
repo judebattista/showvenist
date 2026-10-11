@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Literal
 
 from showvenist.config import data_dir
-from showvenist.state.migrations import migrate
+from showvenist.state.migrations import SCHEMA_VERSION, SchemaTooNew, migrate
 
 MatchStatus = Literal["confirmed", "rejected", "undone"]
 MatchSource = Literal["auto", "manual", "name"]
@@ -83,20 +83,61 @@ class RenameOp:
     undone_at: str | None
 
 
+class StateDbMissing(Exception):
+    """A read-only open found no state.db."""
+
+
+class SchemaOutdated(Exception):
+    """A read-only open found a state.db older than this showvenist's schema."""
+
+
 class StateDb:
     """One connection, serialized by a lock (the TUI and the CLI share it across threads)."""
 
-    def __init__(self, path: Path | str):
+    def __init__(self, path: Path | str, *, readonly: bool = False):
         self.path = str(path)
+        self.readonly = readonly
+        self._lock = threading.RLock()
+        if readonly:
+            self._open_readonly()
+            return
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.RLock()
         self.conn = sqlite3.connect(self.path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         with self._lock:
             self.conn.execute("PRAGMA journal_mode=WAL")
             self.conn.execute("PRAGMA foreign_keys=ON")
             self.migrated_from = migrate(self.conn)
+
+    def _open_readonly(self) -> None:
+        """No migration, no journal-mode change, no file creation; `mode=ro`."""
+        if self.path == ":memory:" or not Path(self.path).exists():
+            raise StateDbMissing(f"no state.db at {self.path}; run a command that records "
+                                 "history first (e.g. identify --apply or assign)")
+        uri = Path(self.path).resolve().as_uri() + "?mode=ro"
+        self.conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
+        with self._lock:
+            self.conn.execute("PRAGMA foreign_keys=ON")
+            version = int(self.conn.execute("PRAGMA user_version").fetchone()[0])
+            self.migrated_from = version
+            if version > SCHEMA_VERSION:
+                self.conn.close()
+                raise SchemaTooNew(
+                    f"state.db is schema {version}; this showvenist knows {SCHEMA_VERSION}")
+            if version < SCHEMA_VERSION:
+                self.conn.close()
+                raise SchemaOutdated(
+                    f"state.db is schema {version}, this showvenist needs {SCHEMA_VERSION}; "
+                    "run a command that writes history (identify --apply, assign, undo) to "
+                    "upgrade it")
+
+    @classmethod
+    def open_readonly(cls, path: Path | str | None = None) -> StateDb:
+        """Open an existing state.db for reading only (report, --plan, history, eval
+        --from-history). Raises StateDbMissing / SchemaOutdated rather than writing."""
+        return cls(path if path is not None else state_db_path(), readonly=True)
 
     @classmethod
     def open_default(cls) -> StateDb:

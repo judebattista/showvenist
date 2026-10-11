@@ -80,7 +80,23 @@ CREATE INDEX rename_op_status ON rename_op (status);
 CREATE INDEX rename_op_dupe ON rename_op (show_slug, episode_id, dupe_index);
 """
 
-MIGRATIONS: tuple[str, ...] = (_V1,)
+# v2: what a journaled move decided, written with the `planned` row, so that recovery can
+# confirm the match of a move it completes (§13.4 step 3) after the plan is gone; and whether
+# the move crosses filesystems (recovery may finish a verified copy by removing the original).
+# All nullable: rows journaled under v1 have none of it (recovery then writes no match).
+_V2 = f"""
+ALTER TABLE rename_op ADD COLUMN season INTEGER;
+ALTER TABLE rename_op ADD COLUMN episode INTEGER;
+ALTER TABLE rename_op ADD COLUMN title TEXT;
+ALTER TABLE rename_op ADD COLUMN match_source TEXT CHECK (match_source IN ({_in(MATCH_SOURCES)}));
+ALTER TABLE rename_op ADD COLUMN confidence TEXT CHECK (confidence IN ('high', 'medium', 'low'));
+ALTER TABLE rename_op ADD COLUMN bundle_revision TEXT;
+ALTER TABLE rename_op ADD COLUMN disc_label TEXT;
+ALTER TABLE rename_op ADD COLUMN prior_match INTEGER;  -- 1: links an earlier confirmed match
+ALTER TABLE rename_op ADD COLUMN cross_fs INTEGER;     -- 1: copy, verify, remove the original
+"""
+
+MIGRATIONS: tuple[str, ...] = (_V1, _V2)
 SCHEMA_VERSION = len(MIGRATIONS)
 
 

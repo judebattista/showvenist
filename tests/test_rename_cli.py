@@ -198,3 +198,27 @@ def test_duplicate_rank_follows_quality_then_path(tmp_path):
     s._quality = {a: Quality(10, 1.0, 5), b: Quality(50, 0.5, 5), c: Quality(50, 0.5, 9)}
     got = {Path(k).name: v for k, v in s._duplicate_ranks().items()}
     assert got == {"c.mkv": (p, 0), "b.mkv": (p, 1), "e.mkv": (p, 2), "a.mkv": (p, 3)}
+
+
+def test_history_without_state_db_creates_nothing(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "st"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    r = CliRunner().invoke(cli.app, ["history"])
+    assert "History is empty" in r.output and not state_db_path().exists()
+
+
+def test_undo_keeps_matches_of_files_not_moved_back(tmp_path):
+    from showvenist.state.history import History
+
+    db = StateDb(tmp_path / "s.db")
+    h = History(db)
+    with db.transaction() as c:
+        c.execute("insert into run(id, started_at, command, args) values (1,'t','c','a')")
+        for i, fp in enumerate(("a", "b"), 1):
+            c.execute("insert into media_file(fingerprint, size, last_path, first_seen, last_seen)"
+                      " values (?,1,?,'t','t')", (fp, f"/x/{fp}"))
+            c.execute("insert into match(id, fingerprint, show_slug, episode_id, status, source,"
+                      " run_id, created_at) values (?,?,'s','e','confirmed','auto',1,'t')", (i, fp))
+    assert h.mark_undone(1, frozenset({"b"})) == 1
+    st = dict(db.conn.execute("select fingerprint, status from match").fetchall())
+    assert st == {"a": "undone", "b": "confirmed"}

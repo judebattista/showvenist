@@ -170,9 +170,10 @@ def test_failed_and_vanished_moves_do_not_stop_the_run(tmp_path):
     assert "Permission denied" in why["t00.mkv"]
     assert why["t00.en.srt"] == "its video was not moved"
     assert why["t01.mkv"] == "the file is gone"
-    assert [m.old for m in res.done] == [f["e2"], f["d"]]
-    assert f["e1"].exists() and (s / "Disc 1" / "t00.en.srt").exists()
-    assert statuses(db) == ["done", "done"]  # the failed move's journal row was dropped
+    assert "its primary t00.mkv was not moved" in why["t02.mkv"]  # no _dupe_1 beside t00
+    assert [m.old for m in res.done] == [f["e2"]]
+    assert f["e1"].exists() and (s / "Disc 1" / "t00.en.srt").exists() and f["d"].exists()
+    assert statuses(db) == ["done"]  # the failed move's journal row was dropped
 
 
 def test_recover_reconciles_planned_rows(tmp_path):
@@ -221,8 +222,9 @@ def test_undo_round_trip(tmp_path):
     shown = []
     u = undo_run(db, None, confirm=lambda o: shown.append(o) or True)
     assert u.run_id == res.run_id and not u.skipped and len(u.undone) == 5
-    assert [o.kind for o in shown[0]] == ["episode", "sidecar", "episode", "extra", "duplicate"]
-    assert [o.kind for o in u.undone] == ["duplicate", "extra", "episode", "sidecar", "episode"]
+    # reverse order, each video before its sidecar (shown in the order it happens)
+    assert [o.kind for o in shown[0]] == ["duplicate", "extra", "episode", "episode", "sidecar"]
+    assert [o.kind for o in u.undone] == ["duplicate", "extra", "episode", "episode", "sidecar"]
     files1, dirs1 = snapshot(s)
     assert files1 == files0  # every file back where it was, byte for byte
     assert dirs0 <= dirs1 and "extras" in dirs1  # the created folder stays

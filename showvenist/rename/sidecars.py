@@ -22,9 +22,15 @@ def find_sidecars(video: Path) -> list[Path]:
         names = os.listdir(video.parent)
     except OSError:
         return []
+    # a longer video stem that also prefixes a name owns it (A.part2.en.srt is A.part2.mkv's)
+    longer = [Path(n).stem + "." for n in names
+              if Path(n).suffix.lower() in VIDEO_EXTS and len(Path(n).stem) > len(video.stem)
+              and Path(n).stem.startswith(prefix)]
     out = []
     for name in names:
         if name == video.name or not name.startswith(prefix):
+            continue
+        if any(name.startswith(s) for s in longer):
             continue
         p = video.parent / name
         if p.suffix.lower() in VIDEO_EXTS or not p.is_file() or p.is_symlink():

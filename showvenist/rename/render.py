@@ -11,7 +11,7 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
-from showvenist.rename.types import ApplyResult, Plan, UndoResult
+from showvenist.rename.types import ApplyResult, Plan, RecoveryReport, UndoResult
 from showvenist.state.db import RenameOp
 
 
@@ -81,15 +81,24 @@ def format_plan(plan: Plan) -> str:
     return buf.getvalue()
 
 
+def format_recovery(rec: RecoveryReport | None) -> str:
+    """What recovery did with leftovers of an interrupted run; '' when there were none."""
+    if rec is None or (rec.empty and not rec.notes):
+        return ""
+    lines = [f"Recovered from an earlier interrupted run: {len(rec.completed)} completed, "
+             f"{len(rec.rolled_back)} rolled back, {len(rec.unresolved)} unresolved"
+             + (f", {len(rec.removed_partials)} partial copies removed"
+                if rec.removed_partials else "")]
+    lines += [f"  {n}" for n in rec.notes]
+    return "\n".join(lines) + "\n"
+
+
 def format_apply(res: ApplyResult) -> str:
     buf = io.StringIO()
     con = _console(buf)
-    rec = res.recovered
-    if rec is not None and (rec.completed or rec.rolled_back or rec.unresolved):
-        con.print(f"Recovered from an earlier interrupted run: {len(rec.completed)} completed, "
-                  f"{len(rec.rolled_back)} rolled back, {len(rec.unresolved)} unresolved")
-        for op in rec.unresolved:
-            con.print(f"  unresolved (left as planned): {op.old_path} -> {op.new_path}")
+    rec = format_recovery(res.recovered)
+    if rec:
+        con.print(rec, end="")
     if res.cancelled:
         con.print("Nothing was moved.")
         return buf.getvalue()
@@ -105,7 +114,8 @@ def format_apply(res: ApplyResult) -> str:
 
 
 def format_ops(ops: list[RenameOp]) -> str:
-    """An undo listing: each move back, in the order it will happen."""
+    """An undo listing: each move back, in the order it will happen (`ops` as `undo_run`
+    passes them, already in undo order)."""
     buf = io.StringIO()
     con = _console(buf)
     paths = [Path(o.old_path) for o in ops] + [Path(o.new_path) for o in ops]
@@ -115,15 +125,17 @@ def format_ops(ops: list[RenameOp]) -> str:
               title_justify="left")
     for col in ("Kind", "Now at", "Back to"):
         t.add_column(col, overflow="fold")
-    for o in reversed(ops):
+    for o in ops:
         t.add_row(*_row(o.kind, _rel(Path(o.new_path), root), _rel(Path(o.old_path), root)))
     con.print(t)
     return buf.getvalue()
 
 
 def format_undo(res: UndoResult) -> str:
+    rec = format_recovery(res.recovered)
     if res.cancelled:
-        return "Nothing was moved."
-    lines = [f"Run {res.run_id}: moved back {len(res.undone)}, skipped {len(res.skipped)}."]
+        return rec + "Nothing was moved."
+    lines = [rec.rstrip("\n")] if rec else []
+    lines += [f"Run {res.run_id}: moved back {len(res.undone)}, skipped {len(res.skipped)}."]
     lines += [f"  skipped {o.new_path}: {why}" for o, why in res.skipped]
     return "\n".join(lines)

@@ -645,7 +645,7 @@ def identify(
     from showvenist.hierarchy.parse import is_duplicate_disc_problem
     from showvenist.report import exit_code, render_tables, to_json
     from showvenist.session import Session
-    from showvenist.state.db import StateDb, state_db_path
+    from showvenist.state.db import SchemaOutdated, StateDb, state_db_path
     from showvenist.state.history import History
 
     if sum((as_report, as_json, as_plan, do_apply)) > 1:
@@ -770,8 +770,12 @@ def identify(
                                           bundle.show.ids.tmdb)
     hist, hist_db = None, None
     if state_db_path().exists():  # report mode never creates or writes state.db
-        hist_db = StateDb.open_default()
-        hist = History(hist_db)
+        try:
+            hist_db = (StateDb.open_default() if do_apply else StateDb.open_readonly())
+        except SchemaOutdated as e:
+            typer.echo(f"identify: history ignored: {e}", err=True)
+        if hist_db is not None:
+            hist = History(hist_db)
     reports = []
     for snode, num in jobs:
         sub = replace(tree, seasons=[snode])
@@ -886,70 +890,84 @@ def _plan_and_apply(reports, bundle, cfg, marker, hist, hist_db, do_apply: bool,
     """identify --plan / --apply (§4.3, decision 58): one plan per solved season, built by
     rename.plan.build_plan, printed in full; --apply moves through rename.movelog.apply_plan.
     --plan writes nothing: state.db is read only when it already exists (decision 60: it prints
-    a plan token and saves it; --apply --confirm needs the rebuilt plan to hash to the token)."""
-    from showvenist.rename.movelog import PlanRefused, apply_plan
+    a plan token and saves it; --apply --confirm needs the rebuilt plan to hash to the token).
+
+    --apply first recovers leftovers of an interrupted run (§13.4), whatever happens next, then
+    asks once for all the plans and records ONE run for the invocation (§7.2), so `undo` reverses
+    every season it moved."""
+    from showvenist.rename.movelog import PlanRefused, apply_plan, recover
     from showvenist.rename.plan import build_plan
-    from showvenist.rename.render import format_apply, format_plan
+    from showvenist.rename.render import format_apply, format_plan, format_recovery
+    from showvenist.rename.token import normalize_token, plan_token, save_last_token
     from showvenist.rename.types import PlanOptions
-    from showvenist.state.db import StateDb
+    from showvenist.state.db import StateDb, state_db_path
+    from showvenist.state.history import History
 
     opts = PlanOptions(
         naming_order=marker.naming_order if marker is not None else None,
         template=cfg.naming.template, move_extras=cfg.naming.move_extras,
     )
     codes = [_final_exit_code(reports, exit_code)]
-    plans = []
-    for r in reports:
-        if len(reports) > 1:
-            typer.echo(f"== {_season_title(r.season)} ==")
-        typer.echo(render_tables(r))
-        try:
-            plan = build_plan(r, bundle, opts, history=hist)
-        except ValueError as e:
-            _fail(f"identify: {e}")
-        typer.echo(format_plan(plan))
-        plans.append(plan)
-        if not plan.ok:
-            codes.append(1)
-    from showvenist.rename.token import normalize_token, plan_token, save_last_token
-
-    token = plan_token(plans)
-    if not do_apply:
-        if any(p.moves for p in plans):
-            save_last_token(token)
-            typer.echo(f"Plan token: {token}  (apply with --apply --confirm {token}, or "
-                       "--confirm last)")
-        return max(codes)
-    if any(not p.ok for p in plans):
-        typer.echo("Not applied: the plan has errors (nothing was moved).", err=True)
-        return 1
-    if not any(p.moves for p in plans):
-        typer.echo("Nothing to move.")
-        return max(codes)
-    if confirm_token is not None and normalize_token(token) != confirm_token:
-        typer.echo(f"Not applied: the plan changed since the token was made (token now "
-                   f"{token}). Nothing was moved.", err=True)
-        return 1
-    db = hist_db if hist_db is not None else StateDb.open_default()
+    db = None  # the writable state.db (--apply only)
     try:
+        if do_apply and state_db_path().exists():  # no state.db: nothing can be left over
+            db = (hist_db if hist_db is not None and not getattr(hist_db, "readonly", False)
+                  else StateDb.open_default())
+            rec = format_recovery(recover(db))
+            if rec:
+                typer.echo(rec, nl=False, err=True)
+        plans = []
+        for r in reports:
+            if len(reports) > 1:
+                typer.echo(f"== {_season_title(r.season)} ==")
+            typer.echo(render_tables(r))
+            try:
+                plan = build_plan(r, bundle, opts, history=hist)
+            except ValueError as e:
+                _fail(f"identify: {e}")
+            typer.echo(format_plan(plan))
+            plans.append(plan)
+            if not plan.ok:
+                codes.append(1)
+        token = plan_token(plans)
+        if not do_apply:
+            if any(p.moves for p in plans):
+                save_last_token(token)
+                typer.echo(f"Plan token: {token}  (apply with --apply --confirm {token}, or "
+                           "--confirm last)")
+            return max(codes)
+        if any(not p.ok for p in plans):
+            typer.echo("Not applied: the plan has errors (nothing was moved).", err=True)
+            return 1
+        if not any(p.moves for p in plans):
+            typer.echo("Nothing to move.")
+            return max(codes)
+        if confirm_token is not None and normalize_token(token) != confirm_token:
+            typer.echo(f"Not applied: the plan changed since the token was made (token now "
+                       f"{token}). Nothing was moved.", err=True)
+            return 1
+        n_moves = sum(len(p.moves) for p in plans)
+        if confirm_token is None and not _typed_yes(f"Move {n_moves} file(s) as listed above?"):
+            typer.echo("Nothing was moved.")
+            return 1
+        if db is None:
+            db = StateDb.open_default()
+        # one run row for the whole invocation, after consent (decision 59: nothing proposed)
+        run = History(db).begin_run("identify --apply", " ".join(sys.argv[1:]))
+
+        def confirm_cross(ms) -> bool:
+            # crossing filesystems copies and removes: always typed, never by --confirm alone
+            return interactive and _typed_yes(
+                f"{len(ms)} move(s) cross filesystems (copy, check, then remove the "
+                "original).")
+
         for plan in plans:
             if not plan.moves:
                 continue
-
-            def confirm(p) -> bool:
-                return confirm_token is not None or _typed_yes(
-                    f"Move {len(p.moves)} file(s) as listed above?")
-
-            def confirm_cross(ms) -> bool:
-                # crossing filesystems copies and removes: always typed, never by --confirm alone
-                return interactive and _typed_yes(
-                    f"{len(ms)} move(s) cross filesystems (copy, check, then remove the "
-                    "original).")
-
             try:
-                res = apply_plan(plan, db, command="identify --apply",
-                                 args=" ".join(sys.argv[1:]), confirm=confirm,
-                                 confirm_cross_fs=confirm_cross)
+                res = apply_plan(plan, db, command="identify --apply", args="",
+                                 confirm=lambda p: True, confirm_cross_fs=confirm_cross,
+                                 run_id=run.id)
             except PlanRefused as e:
                 typer.echo(f"Not applied: {e}", err=True)
                 return 1
@@ -957,7 +975,7 @@ def _plan_and_apply(reports, bundle, cfg, marker, hist, hist_db, do_apply: bool,
             if res.cancelled or res.failed:
                 codes.append(1)
     finally:
-        if db is not hist_db:
+        if db is not None and db is not hist_db:
             db.close()
     return 1 if 1 in codes else max(codes)
 
@@ -1100,9 +1118,9 @@ def _assign_rename(file: Path, fp: str, slug: str, bundle, eid: str | None,
     match is recorded as a plain assign."""
     from showvenist.config import load_config
     from showvenist.hierarchy.parse import parse_disc
-    from showvenist.rename.movelog import PlanRefused, apply_plan
+    from showvenist.rename.movelog import PlanRefused, apply_plan, recover
     from showvenist.rename.plan import build_plan
-    from showvenist.rename.render import format_apply, format_plan
+    from showvenist.rename.render import format_apply, format_plan, format_recovery
     from showvenist.rename.types import PlanOptions
     from showvenist.report import format_odds
     from showvenist.report_schema import (
@@ -1135,6 +1153,9 @@ def _assign_rename(file: Path, fp: str, slug: str, bundle, eid: str | None,
                     summary=Summary(files=1, high=1, medium=0, low=0, extras=int(ref is None)))
     opts = PlanOptions(naming_order=naming_order, template=cfg.naming.template)
     with StateDb.open_default() as db:
+        rec = format_recovery(recover(db))  # §13.4: before anything else, whatever follows
+        if rec:
+            typer.echo(rec, nl=False, err=True)
         hist = History(db)
         try:
             plan = build_plan(report, bundle, opts, history=hist)
@@ -1183,7 +1204,7 @@ def undo(
 ) -> None:
     """Reverse an applied rename run: shows its moves, asks y/N, moves files back in reverse
     order; the run's matches become undone (§13.5). Never overwrites; folders stay."""
-    from showvenist.rename.render import format_ops, format_undo
+    from showvenist.rename.render import format_ops, format_recovery, format_undo
     from showvenist.rename.undo import undo_run
     from showvenist.state.db import StateDb, state_db_path
 
@@ -1197,8 +1218,11 @@ def undo(
         return yes or typer.confirm(f"Move {len(ops)} file(s) back?", default=False)
 
     with StateDb.open_default() as db:
-        res = undo_run(db, run_id, confirm=confirm)
+        res = undo_run(db, run_id, confirm=confirm)  # recovers leftovers first (§13.4)
     if res.run_id is None or (not res.undone and not res.skipped and not res.cancelled):
+        rec = format_recovery(res.recovered)
+        if rec:
+            typer.echo(rec, nl=False, err=True)
         _fail("undo: nothing to undo" + (f" in run {run_id}" if run_id is not None else ""))
     typer.echo(format_undo(res))
     if res.cancelled or res.skipped:
@@ -1214,10 +1238,17 @@ def history_cmd(
     root: Path | None = typer.Option(None, "-o", help="Bundle root directory"),
 ) -> None:
     """Per season: confirmed episodes with their files, missing episodes, confirmed extras."""
-    from showvenist.state.db import StateDb
+    from showvenist.state.db import SchemaOutdated, StateDb, StateDbMissing
     from showvenist.state.history import History
 
-    with StateDb.open_default() as db:
+    try:
+        db = StateDb.open_readonly()
+    except StateDbMissing:
+        typer.echo("History is empty.")
+        return
+    except SchemaOutdated as e:
+        _fail(f"history: {e}")
+    with db:
         hist = History(db)
         slugs = [_resolve_bundle(show, root)[0]] if show else hist.shows()
         if not slugs:
@@ -1387,11 +1418,17 @@ def eval_cmd(
     hl = None
     if from_history:
         from showvenist.eval.history import history_labels
-        from showvenist.state.db import StateDb
+        from showvenist.state.db import SchemaOutdated, StateDb, StateDbMissing
         from showvenist.state.history import History
 
         slug_only = _resolve_bundle(show, root)[0] if show else None
-        with StateDb.open_default() as hdb:
+        try:
+            hdb = StateDb.open_readonly()
+        except StateDbMissing:
+            _fail("eval: no history (no state.db)")
+        except SchemaOutdated as e:
+            _fail(f"eval: {e}")
+        with hdb:
             hl = history_labels(History(hdb), [slug_only] if slug_only else None)
         rows = hl.rows
         if not rows:

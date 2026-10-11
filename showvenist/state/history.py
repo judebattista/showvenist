@@ -133,22 +133,30 @@ class History:
         if episode_id is None and (season is not None or episode is not None):
             raise ValueError("an extra carries no season or episode")
         same = c.execute(
-            "select id from match where fingerprint=? and show_slug=? and"
+            "select id, run_id, source from match where fingerprint=? and show_slug=? and"
             " status='confirmed' and episode_id is ?",
             (fingerprint, show_slug, episode_id),
         ).fetchone()
-        if same:  # re-confirming the same target refreshes the row, rejects nothing
-            c.execute(
-                "update match set season=?, episode=?, title=?, source=?, confidence=?,"
-                " margin=?, bundle_revision=?, run_id=?, created_at=? where id=?",
-                (season, episode, title, source, confidence, margin, bundle_revision,
-                 run_id, _now(), same[0]),
-            )
+        if same:  # re-confirming the same target rejects nothing
+            sid, old_run, old_source = same
+            if old_run is not None and run_id is not None and old_run != run_id:
+                # An earlier run owns this decision: leave its row (and run_id) alone so
+                # undoing either run touches only its own decisions. The new run restates a
+                # decision already on record; only a manual pin may upgrade the source.
+                if source == "manual" and old_source != "manual":
+                    c.execute("update match set source='manual' where id=?", (sid,))
+            else:
+                c.execute(
+                    "update match set season=?, episode=?, title=?, source=?, confidence=?,"
+                    " margin=?, bundle_revision=?, run_id=?, created_at=? where id=?",
+                    (season, episode, title, source, confidence, margin, bundle_revision,
+                     run_id, _now(), sid),
+                )
             c.execute(
                 "update match set status='rejected' where fingerprint=? and show_slug=?"
-                " and status='confirmed' and id<>?", (fingerprint, show_slug, same[0]))
+                " and status='confirmed' and id<>?", (fingerprint, show_slug, sid))
             return _match(c.execute(
-                f"select {_MATCH_COLS} from match where id=?", (same[0],)).fetchone())
+                f"select {_MATCH_COLS} from match where id=?", (sid,)).fetchone())
         c.execute(
             "update match set status='rejected' where fingerprint=? and show_slug=?"
             " and status='confirmed'",
@@ -171,13 +179,20 @@ class History:
                 episode=episode, title=title, status="rejected", source="auto", run_id=run_id,
             )
 
-    def mark_undone(self, run_id: int) -> int:
-        """`undo`: the run's confirmed matches become `undone`; returns how many."""
+    def mark_undone(self, run_id: int, keep: frozenset[str] = frozenset()) -> int:
+        """`undo`: the run's confirmed matches become `undone`, except those of the
+        fingerprints in `keep` (files whose move back was skipped and that stay at their new
+        name); returns how many."""
         with self.db.transaction() as c:
-            return c.execute(
-                "update match set status='undone' where run_id=? and status='confirmed'",
-                (run_id,),
-            ).rowcount
+            n = 0
+            for mid, fp in c.execute(
+                    "select id, fingerprint from match where run_id=? and status='confirmed'",
+                    (run_id,)).fetchall():
+                if fp in keep:
+                    continue
+                c.execute("update match set status='undone' where id=?", (mid,))
+                n += 1
+            return n
 
     def forget(self, fingerprint: str) -> int:
         """Remove every record of a file (media_file, match; rename_op rows keep their text

@@ -10,8 +10,11 @@ Choices made where the spec leaves room (all on the safe side):
   the planner never invents a folder name for a season.
 - Unpinned files flagged `play_all` that were decided as an episode stay out of the plan
   (decision 49: a play-all is never given an episode name without review).
-- A duplicate of an extra is left alone (`duplicate_of_extra`). A duplicate whose primary is
-  not eligible (medium, low, out of scope...) is skipped (`duplicate_primary_missing`).
+- A duplicate of an extra is left alone (`duplicate_of_extra`). A duplicate is renamed only
+  when its primary got a target in this plan (a move, or already in place); a primary that is
+  not eligible, unticked, out of scope or skipped for any other reason leaves its copies
+  alone (`duplicate_primary_missing`). Apply also renames a copy only after its primary's
+  move succeeded (`PlannedMove.primary`).
 - A `dupe_X` that is already taken on disk bumps X (numbers are never reused) instead of
   adding a collision suffix.
 - Paths are made absolute (`os.path.abspath`), so the move log works from any directory.
@@ -92,6 +95,7 @@ class _Video:
     pinned: bool = False
     confirmed: bool = False
     dupe_index: int | None = None
+    primary_old: Path | None = None  # a duplicate's primary
     reason: str = ""
 
 
@@ -237,6 +241,7 @@ def build_plan(
         return naming.with_collision_index(target, n), n
 
     planned: list[tuple[_Video, Path, int | None]] = []
+    placed: dict[Path, Path | None] = {}  # primaries with a target: new path (None = in place)
     eps = sorted((v for v in videos if v.kind == "episode"),
                  key=lambda v: (v.season, v.episode, str(v.old)))
     extras = sorted((v for v in videos if v.kind == "extra"), key=lambda v: str(v.old))
@@ -269,12 +274,14 @@ def build_plan(
             v.reason = f"extra, {v.fr.confidence.level} {v.fr.confidence.odds}{_flags_text(v.fr)}"
         if target == v.old:
             skip(v.old, "already_in_place")
+            placed[v.old] = None
             continue
         target, n = settle(target, v.old)
         if n is not None:
             plan.notices.append(f"{target.name}: suffixed _{n}, the name was taken")
         taken.add(target)
         planned.append((v, target, n))
+        placed[v.old] = target
 
     # duplicates: renamed in place, X per episode in rank order, never reused
     by_primary: dict[str, list[tuple[FileReport, Path]]] = {}
@@ -286,6 +293,10 @@ def build_plan(
             continue
         if prim.kind != "episode":
             skip(old, "duplicate_of_extra", f"a copy of the extra {prim.old.name}: left as is")
+            continue
+        if prim.old not in placed:
+            skip(old, "duplicate_primary_missing",
+                 f"its primary {prim.old.name} is not moved in this plan: left as is")
             continue
         if old in exclude:
             skip(old, "excluded", "unticked")
@@ -311,7 +322,7 @@ def build_plan(
                     break
             v = _Video(fr, old, "duplicate", episode_id=eid, season=prim.season,
                        episode=prim.episode, title=prim.title, stem=stem, pinned=prim.pinned,
-                       dupe_index=x)
+                       dupe_index=x, primary_old=prim.old)
             v.reason = (f"duplicate of {prim.old.name} (S{prim.season:02d}E{prim.episode:02d}),"
                         f" stays in its folder{_flags_text(fr)}")
             taken.add(target)
@@ -319,6 +330,7 @@ def build_plan(
 
     # --- moves with their sidecars --------------------------------------------------------
     claimed = {v.old for v, _, _ in planned}
+    index_of: dict[Path, int] = {}  # video path -> its index in plan.moves
     for v, target, n in planned:
         level = v.fr.confidence.level
         plan.moves.append(PlannedMove(
@@ -328,8 +340,10 @@ def build_plan(
             dupe_index=v.dupe_index, collision_index=n, pinned=v.pinned,
             confidence=level,  # type: ignore[arg-type]
             reason=v.reason, confirmed=v.confirmed, disc=v.fr.disc,
+            primary=index_of.get(v.primary_old) if v.primary_old is not None else None,
         ))
         vi = len(plan.moves) - 1
+        index_of[v.old] = vi
         for sc in sidecars(v.old):
             sc = Path(os.path.abspath(sc))
             if sc in claimed:
