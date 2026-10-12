@@ -147,7 +147,7 @@ The executable is `showvenist`. All commands that change files or the environmen
 ```
 showvenist ingest <show> [--ref URL|ID ...] [--source tmdb,tvmaze,wikipedia]
                          [--subs opensubtitles|DIR] [--season N]
-                         [--year YYYY] [--tmdb-id N] [--refresh] [-o DIR]
+                         [--year YYYY] [--tmdb-id N] [--refresh [--diff] [--yes]] [-o DIR]
 ```
 
 - Each `--ref` is routed to the adapter that handles it:
@@ -156,7 +156,8 @@ showvenist ingest <show> [--ref URL|ID ...] [--source tmdb,tvmaze,wikipedia]
   - `en.wikipedia.org/wiki/List_of_…` → Wikipedia
   - `imdb.com/title/tt…` → **looked up through TMDB's `/find` endpoint only**. IMDb is never scraped: that's against its terms of use and fragile.
 - Ambiguous names ("The Office"): interactive pick, or `--year` / `--tmdb-id`. Non-interactive runs fail and list the candidates.
-- `--refresh` re-fetches an existing bundle and prints a diff (§6.8).
+- `--source` lists the sources to fetch. The default is `tmdb,tvmaze` (`ingest.sources` in `config.toml`); `--source tmdb` leaves TVmaze out. A secondary source that fails to fetch or find the show is a warning with a note of what is missing, not an error; TMDB failing is an error. Wikipedia is not built yet (decision 62).
+- `--refresh` re-fetches an existing bundle and prints a diff (§6.8): it asks y/N before writing (`--yes` skips the question and is needed without a TTY), and `--diff` prints the diff and writes nothing.
 - Every ingest ends with the data-quality report (§6.7).
 
 ### 4.3 `identify`
@@ -414,9 +415,9 @@ All adapters implement `fetch(show_ref) -> PartialBundle`.
 |---|---|---|---|
 | **TMDB** (primary) | M1 | Episodes, overview, runtime, crew (writer/director), guest stars with character, episode groups (DVD/absolute orders), production status | `/search/tv`, `/tv/{id}` with `append_to_response` for seasons, `/tv/{id}/season/{n}`, `/tv/{id}/episode_groups`, `/find` for IMDb IDs. Free API key. |
 | **Local SRT folder** | M1 | Reference subtitles | Maps files to episodes by `SxxEyy` in the filename (in aired order unless configured otherwise). |
-| **TVmaze** | M7 | Episodes, summaries (HTML), runtimes | No key. `/singlesearch/shows`, `/shows/{id}/episodes?specials=1`. |
-| **Wikipedia** | M7 | Title, writer, director, air date, short summary | MediaWiki API wikitext; `{{Episode list}}` templates parsed with `mwparserfromhell`; must resolve transcluded season pages. |
-| **OpenSubtitles** | M7 | Reference subtitles | REST API; needs a key and a login; daily download quota, so ingest is **resumable** and picks up where it stopped. |
+| **TVmaze** | M7 | Episodes, summaries (HTML, stripped), runtimes, air dates, real episode titles | No key. `/singlesearch/shows`, `/shows/{id}/episodes?specials=1`. Secondary source (§6.5). |
+| **Wikipedia** | later (decision 62) | Title, writer, director, air date, short summary | MediaWiki API wikitext; `{{Episode list}}` templates parsed with `mwparserfromhell`; must resolve transcluded season pages. |
+| **OpenSubtitles** | M3, parked (decision 43) | Reference subtitles | REST API; needs a key and a login; daily download quota, so ingest is **resumable** and picks up where it stopped. |
 
 TMDB terms: the README and `showvenist --version` show "This product uses the TMDB API but is not endorsed or certified by TMDB."
 
@@ -430,8 +431,16 @@ TMDB terms: the README and `showvenist --version` show "This product uses the TM
   - specials placed inside a season or in S00,
   - anime cours split into separate seasons or merged into one,
   - unaired episodes appended or slotted in.
-- Lined-up episodes get the extra data. Synopses from every source are kept; credits and guest characters are combined and deduplicated.
-- Episodes that can't be lined up, and numbering disagreements, are recorded as **conflicts** in `provenance` and listed in the quality report. They're **never added automatically**; you resolve them in overrides.
+- Lined-up episodes get the extra data, **at ingest**: the merged result is what `show.json` holds, so identification stays offline and `bundle_revision` stays a plain content hash (it excludes `provenance`).
+  - A secondary source's episode title goes into `alt_titles` (when it differs from the primary's after normalizing); the primary's title stays the display title. TMDB's Roman-numeral titles for Samurai Jack therefore gain TVmaze's real titles.
+  - Its summary is added as a further `Synopsis` with `source` set to the adapter; HTML is stripped. Synopses from every source are kept.
+  - `runtime_min`, `air_date` and `production_code` are filled only when the primary has none. An air date that differs by more than 3 days for an aligned episode is a conflict and nothing is overwritten.
+  - Credits and guest characters are combined and deduplicated.
+- **Alignment** runs per season of the primary's aired ordering, as a sequence alignment on fuzzy title similarity (a title that is a Roman numeral or `Episode N` carries no weight), air-date proximity and position. A pair under the confidence threshold is not merged. Secondary episodes with no partner in a primary season-0 (specials) are not conflicts.
+- Episodes that can't be lined up, and numbering disagreements, are recorded as **conflicts** in `provenance[].conflict` and listed in the quality report and `bundle check`. They're **never added automatically**; you resolve them in overrides.
+- **Splits.** When the secondary has two or more episodes where the primary has one (a two-part episode on one disc entry, such as TMDB's single "Birth of Evil" against TVmaze's parts 1 and 2), the conflict carries a paste-ready `overrides.yaml` block (`new_episodes` and the ordering entries) for `bundle edit` to append (§6.6).
+
+**Contract.** `adapters/tvmaze.py`: `TvmazeAdapter(client).search(title, year) -> list[dict]` and `.fetch(tvmaze_id) -> PartialBundle` (episodes with ids `tvmaze:<id>`, title, `air_date`, `runtime_min`, one `Synopsis(source="tvmaze")` with HTML stripped, season/number kept in a single `aired` ordering of source `tvmaze`; specials in season 0). `bundle/merge.py`: `merge_sources(primary: Bundle, secondaries: list[PartialBundle]) -> Bundle` (pure; no network, no clock except an injected `fetched_at`). A conflict is `Provenance(adapter=<secondary>, conflict={...})` with string values: `kind` (`split`, `unaligned_primary`, `unaligned_secondary`, `air_date`, `numbering`), `season`, `primary` and `secondary` (episode ids or titles), `detail`, and for splits `fix` (the YAML block). Config: `[ingest] sources = ["tmdb", "tvmaze"]`.
 
 ### 6.6 Overrides
 
@@ -489,7 +498,7 @@ title_card:
 - Absent `title_card`, no card is ever read. The tool does not guess that a show has cards.
 - `inspect FILE --card` prints the OCR'd text of every sampled frame in the configured windows (or in `--from`/`--skip`/`--length` given on the command line), to help write the pattern.
 - After a refresh, overrides pointing to episodes that no longer exist produce warnings.
-- `showvenist bundle edit <show>` opens `$EDITOR` and validates on save, reopening the editor on errors.
+- `showvenist bundle edit <show>` opens `overrides.yaml` in `$EDITOR` (creating it from a commented template when absent) and validates it on save the way `load_bundle` does, with errors naming file and line; on an error it reopens the editor or offers to abort. `bundle edit <show> --apply-fix N` appends the paste-ready block of conflict N from `bundle check` before opening the editor.
 
 ### 6.7 Data-quality report
 
@@ -510,8 +519,14 @@ It ends with a plain-language prediction, e.g. *"Season 2: synopsis coverage 40%
 ### 6.8 Refreshing
 
 - Bundles **never update silently**, because history records the `bundle_revision` each match was made against.
-- `ingest --refresh` re-fetches and prints a diff: episodes added or removed, renumbered, episode groups added or removed, a change in which group ranks first for its type (what Jellyfin uses for that display order), and synopses, credits or subtitles added.
-- `identify` warns when a bundle is older than 30 days (configurable) **and** TMDB reports the show as still in production.
+- `ingest --refresh` re-fetches every configured source into memory, merges (§6.5), and prints a diff against the bundle on disk:
+  - episodes added or removed, and renumbered, per ordering;
+  - orderings (episode groups) added or removed, and a change in which group ranks first for its type (what Jellyfin uses for that display order);
+  - titles, alt titles, synopses, credits, runtimes and air dates added or changed; reference subtitles added;
+  - conflicts new or resolved; show-level changes such as `in_production`;
+  - **history impact:** read-only from `state.db`, the confirmed matches whose episodes were removed or renumbered (file, old episode, new episode). Nothing in history is changed.
+- After the diff it asks y/N (`--yes` skips the question and is needed without a TTY); `--diff` prints and writes nothing. On accept the old `show.json` is kept as `show.json.prev` (one generation); `overrides.yaml` is never touched, and after a refresh overrides that point at episodes that no longer exist produce warnings.
+- `identify` warns when a bundle is older than 30 days (configurable) **and** TMDB reports the show as still in production, and the warning names `ingest SHOW --refresh --diff`.
 - Later: flag library files that were named with numbering that has since changed.
 
 ---
@@ -1269,3 +1284,4 @@ Decisions made while writing this spec (2026-10-02) and reviewing it (from 2026-
 | 59 | `state.db` records only what is decided or executed: no `proposed` rows; apply writes the run, confirmed matches and extras and the move log; a pin that overrides the tool's top choice records that choice as `rejected`; `assign` over a confirmed match marks it `rejected`; `undo` marks a run's matches `undone` (ignored by the prior, duplicate warnings and eval labels, kept for the record) | A plan or report is repeatable and recomputes from the same evidence, so stored proposals only pile up. Rejected matches still arrive where they matter (a human overrode the tool). Marking undone matches `rejected` would create false negative labels when a run is undone only to be redone. Chosen by the user |
 | 60 | Consent names what it approves. `--budget USD` (default 0) is the only way to allow paid LLM calls, in `identify` and `eval`; `identify --apply` outside a typed `yes` needs `--confirm TOKEN` (a hash of the exact plan) or `--confirm last` (the most recent `--plan`). `--yes` is removed from `identify` and `eval`; it stays only for the y/N prompts of `assign --rename`, `forget` and `undo`. Supersedes the `--yes` parts of decisions 45 and 58 | One `--yes` meant "spend money" in one place and "move files" in another. A budget also limits the spend, and a plan token ties consent to the plan that was shown: if the files or the evidence changed, the token no longer matches and nothing moves. `--confirm last` removes the typing. Chosen by the user |
 | 61 | M6 first version: seasons are tabs analyzed in the background in tree order; analysis shows progress and the first solve runs when a season's analysis ends (no interim solves, which changes §12.2's "results appear as each file finishes"); slow operations are exclusive thread workers and the UI never touches `Session` while one runs; startup questions are plain prompts before the TUI; pins are in memory until apply; `l` obeys `--budget` and `L` is deferred; `e` takes any text with two separate numbers (season, episode) that names an episode of the active ordering; the review list hides files that need no review (`f` shows all); a pin that overrides the tool's choice records the choice as `rejected` at apply; explicit file arguments are renamed in place | A solve needs all the evidence, so interim confidences would change under the cursor. A single writer needs no locks. Startup dialogs are one-off questions that cost a lot as screens. Spending stays under the one consent rule of decision 60. Overrides are the negative labels decision 59 promised, and explicit files were being flattened against §13.2. Chosen by the user |
+| 62 | M7 order: TVmaze and the merge first, then the refresh diff and `bundle edit`; Wikipedia only if the merge shows a measured gain on the weak shows; the OCR n-gram survival eval (`sv-opu.5`) is parked until reference subtitles exist. `ingest` fetches `tmdb,tvmaze` by default; a failing secondary source is a warning. The merge happens at ingest (not at load); TMDB stays primary for ids, numbering and orderings; titles from other sources go to `alt_titles`, summaries are added as synopses, and gaps are filled but never overwritten. `--refresh` prints a diff with a history-impact list, asks y/N, and keeps `show.json.prev`. `--yes` is also used for that y/N prompt (decision 60 extended) | TVmaze's Samurai Jack list has real titles and split two-parters that TMDB lacks; the diff is useful whatever else is added and the merge should be shown in it; Wikipedia's parsing is the most expensive adapter and unproven; the user has no reference-subtitle corpus. Chosen by the user |
