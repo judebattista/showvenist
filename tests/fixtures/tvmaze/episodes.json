@@ -1,0 +1,10 @@
+[
+  {"id": 70001, "name": "The Lantern Door (1)", "season": 1, "number": 1, "airdate": "2011-03-04", "runtime": 30, "averageRuntime": 24,
+   "summary": "<p>Mira finds a <b>lantern</b> &amp; a locked door.</p><p>Nobody\n  believes&nbsp;her.</p>"},
+  {"id": 70002, "name": "The Lantern Door (2)", "season": 1, "number": 2, "airdate": "2011-03-11", "runtime": null, "averageRuntime": 24,
+   "summary": "<p>The door opens onto a rooftop garden.</p>"},
+  {"id": 70003, "name": "Moss and Mischief", "season": 1, "number": 3, "airdate": "", "runtime": 25, "summary": null},
+  {"id": 70004, "name": "Behind the Quills", "season": 1, "number": null, "airdate": "2011-04-01", "runtime": 10, "summary": ""},
+  {"id": 70005, "name": "Winter Recital", "season": 2, "number": null, "airdate": "2012-12-20", "runtime": 12, "summary": "<p>A short recital.</p>"},
+  {"id": 70006, "name": "Return of the Lantern", "season": 2, "number": 1, "airdate": "2012-01-06", "runtime": 24, "summary": "<p>Mira returns.</p>"}
+]
