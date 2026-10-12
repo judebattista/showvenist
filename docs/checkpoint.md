@@ -6,13 +6,16 @@ operating notes. Read `CLAUDE.md`, then this, then `bd ready`.
 
 ## 1. Where the code is
 
-- Branch **`m4-hierarchy`** (head: see `git log`). Earlier branches are linear ancestors: `m0-spike` → `m1-bundle` →
-  `m3-scoring` → `m4-hierarchy`. **Nothing has been pushed; the user pushes.** Subagents never commit.
-- 953 tests pass; `ruff check .` clean. Python is **`.venv/bin/python`**, `.venv/bin/showvenist`, `.venv/bin/ruff`
+- Branch **`m7-adapters`** (head: see `git log`; branched from `main` at the M6 checkpoint `e14ed0a`). **Nothing is
+  merged to `main` until the user does it.** **Nothing has been pushed; the user pushes.** Subagents never commit.
+- 1057 tests pass; `ruff check .` clean. Python is **`.venv/bin/python`**, `.venv/bin/showvenist`, `.venv/bin/ruff`
   (`uv` is no longer on the PATH; do not install anything).
-- Milestones: **M0–M6 done** and reviewed (one Opus conformance review each, findings fixed; the user ran the
+- Milestones: **M0–M7 done** and reviewed (one Opus conformance review each, findings fixed; the user ran the
   TUI over SSH on a synthetic season: `scripts/demo_season.py DIR` builds one, and `DIR/run.sh` runs showvenist
-  with state kept in DIR). **M7 (more adapters, `sv-opu`) is next.** Decisions 56–61 cover M5 and M6.
+  with state kept in DIR). M7 (decision 62): TVmaze secondary source merged at ingest (`adapters/tvmaze.py`, `bundle/merge.py`: alignment,
+  conflicts in `provenance[].conflict`, split detection with paste-ready overrides fix), `ingest --refresh [--diff]`
+  by slug/stored id with diff + history impact and `show.json.prev`, `bundle edit [--apply-fix N]`, staleness
+  notice. Wikipedia deliberately skipped (`sv-opu.2`; revisit only on measured gain). Decisions 56–62.
 - Beads data is local (Dolt DB is gitignored); backup lives in `data/beads-backup/` (`bd backup sync`).
 
 ## 2. What exists (package `showvenist/`)
@@ -25,8 +28,7 @@ hierarchy (parse, marker, readiness) · session · report (+ **edgeflags**: advi
 `possible_two_parter`) · eval (harness, manifest, runner, fit, render, labelsheet, mkmanifest) · cli (`ingest`,
 `bundle check`, `inspect [--card]`, `identify [--plan|--apply]`, `eval [--from-history]`, `assign`, `history`,
 `forget`, `undo`) · **state** (migrations: schema v2, db with read-only open, history) · **rename** (types, naming,
-plan, sidecars, movelog: journaled apply and crash recovery, undo, token, render). Not built: TUI (M6),
-TVmaze/Wikipedia/merge (M7).
+plan, sidecars, movelog: journaled apply and crash recovery, undo, token, render). TUI (`tui/`). TVmaze + merge (M7).
 
 **M5 (decisions 56–60).** Duplicates are never moved or deleted: the primary is renamed, other copies are renamed
 in place `<episode>_dupe_N`. Extras are always prefixed `disc2__<name>` with `_2`, `_3` collision suffixes, and
@@ -153,8 +155,9 @@ SHOWVENIST_LLM_SCOPE=season .venv/bin/showvenist eval data/manifest-named.csv -o
 
 ## 8. Next steps (in this order; the user decides)
 
-1. **M7 adapters** (`sv-opu`: TVmaze, Wikipedia, multi-source merge, `bundle edit --refresh`, OCR n-gram survival
-   eval). OpenSubtitles stays parked (decision 43). Design talk first.
+1. **M8** per `docs/spec.md` (the user decides). Parked: Wikipedia (`sv-opu.2`), OCR survival eval (`sv-opu.5`, no
+   reference subtitles), OpenSubtitles (decision 43). M7 leftovers: staleness notice lacks `-o ROOT`; indentless
+   YAML list + trailing comment in `--apply-fix`; Bebop shows 12 air_date conflicts (expected per spec).
 2. Known gaps: a newer run's move links to the older run's match row (a `superseded` status would fix it); no CLI
    test applies two seasons in one invocation; byte-identical copies share a fingerprint; `report.render_tables`
    may mishandle bracketed file names. First real `--apply` is done on a copy of a season, never on `/mnt/storage/tv`
