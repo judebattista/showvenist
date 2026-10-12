@@ -57,12 +57,17 @@ def _dump(doc: object, indent: int = 0) -> list[str]:
 
 
 def _insert_at(node: yaml.Node, lines: list[str]) -> int:
-    """Index of the line after the last content line of `node` (trailing blanks and comments
-    that precede the next key are not part of it)."""
+    """Index of the line after the last content line of `node`. Trailing blanks, and comments
+    indented less than its items (they precede the next key), are not part of it; a comment
+    indented like its items is, so the new lines go after it."""
     if isinstance(node, yaml.CollectionNode) and not node.flow_style:
         # block collection (an indentless sequence reports None): ends at the next token
+        col = node.start_mark.column
         i = min(node.end_mark.line, len(lines))
-        while i > 0 and (not lines[i - 1].strip() or lines[i - 1].lstrip().startswith("#")):
+        while i > 0:
+            text = lines[i - 1].lstrip()
+            if text and not (text.startswith("#") and len(lines[i - 1]) - len(text) < col):
+                break
             i -= 1
         return i
     return node.end_mark.line + 1
@@ -80,14 +85,25 @@ def apply_fix(existing: str, fix: str) -> tuple[str, list[str]]:
     entry by entry, so no YAML key is duplicated. In particular every season's fix defines
     `orderings.aired-split` (base + entries): the entries of seasons the file doesn't cover yet
     are added to the one mapping. Comments in `existing` are kept. Returns (text, notes);
-    raises FixError when it can't merge (flow-style sections, a different base)."""
+    raises FixError when it can't merge (invalid YAML, flow-style sections, a different base).
+    CRLF line endings are kept; a missing final newline is added."""
+    crlf = "\r\n" in existing
+    existing = existing.replace("\r\n", "\n")
+    if existing and not existing.endswith("\n"):
+        existing += "\n"
     notes: list[str] = []
     fix_doc = yaml.safe_load(fix) or {}
-    cur = yaml.safe_load(existing) if existing.strip() else {}
+    try:
+        cur = yaml.safe_load(existing) if existing.strip() else {}
+        root = yaml.compose(existing, Loader=yaml.SafeLoader) if existing.strip() else None
+    except yaml.YAMLError as e:
+        mark = getattr(e, "problem_mark", None)
+        where = f" (line {mark.line + 1})" if mark else ""
+        raise FixError(f"overrides.yaml is not valid YAML{where}: {getattr(e, 'problem', e)}; "
+                       "fix it with `bundle edit` first") from None
     cur = cur or {}
     if not isinstance(fix_doc, dict) or not isinstance(cur, dict):
         raise FixError("overrides.yaml and the fix must both be mappings")
-    root = yaml.compose(existing, Loader=yaml.SafeLoader) if existing.strip() else None
     top = _map(root)
     lines = existing.split("\n")
     if lines and lines[-1] == "":
@@ -122,7 +138,8 @@ def apply_fix(existing: str, fix: str) -> tuple[str, list[str]]:
         head = [ln for ln in fix.splitlines() if ln.startswith("#")]
         block = "\n".join([*head, *_dump(appended)])
         out = (out + "\n\n" if out.strip() else "") + block
-    return out + "\n", notes
+    out += "\n"
+    return (out.replace("\n", "\r\n") if crlf else out), notes
 
 
 def _merge_entries(name: str, new: object, old: object, node: yaml.Node, lines: list[str],
@@ -173,14 +190,15 @@ def edit_overrides(
     """Returns "saved", "unchanged" or "aborted". The edit happens in a scratch copy, so
     overrides.yaml is only replaced (atomically) by a file that validated."""
     target = bundle_dir / "overrides.yaml"
-    original = target.read_text(encoding="utf-8") if target.exists() else None
+    # bytes, so CRLF line endings survive (read_text would translate them)
+    original = target.read_bytes().decode("utf-8") if target.exists() else None
     text = original if original is not None else TEMPLATE
     if fix is not None:
         text, notes = apply_fix(text, fix)
         for n in notes:
             echo(f"note: {n}")
     work = bundle_dir / ".overrides.yaml.edit"
-    work.write_text(text, encoding="utf-8")
+    work.write_bytes(text.encode("utf-8"))
     try:
         while True:
             if run_editor(work) != 0:
@@ -196,7 +214,7 @@ def edit_overrides(
             for w in warns:
                 echo(f"warning: {w}")
             break
-        new = work.read_text(encoding="utf-8")
+        new = work.read_bytes().decode("utf-8")
         if original is not None and new == original:
             return "unchanged"
         os.replace(work, target)

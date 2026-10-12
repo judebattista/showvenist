@@ -40,9 +40,10 @@ def bundle_path(slug: str, root: Path | None = None) -> Path:
     return _root(root) / slug
 
 
-def save_bundle(bundle: Bundle, root: Path | None = None) -> Path:
-    """Write show.json atomically; returns its path. Revision is recomputed."""
-    d = bundle_path(slugify(bundle.show.title, bundle.show.year), root)
+def save_bundle(bundle: Bundle, root: Path | None = None, slug: str | None = None) -> Path:
+    """Write show.json atomically; returns its path. Revision is recomputed. `slug` defaults to
+    the one the show's title and year give (a refresh keeps the bundle's existing slug)."""
+    d = bundle_path(slug or slugify(bundle.show.title, bundle.show.year), root)
     # title_card comes from overrides.yaml only; it never reaches show.json or its revision
     bundle = bundle.model_copy(update={"title_card": None}).with_revision(d)
     d.mkdir(parents=True, exist_ok=True)

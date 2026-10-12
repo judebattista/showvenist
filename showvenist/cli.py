@@ -43,11 +43,29 @@ bundle_app = typer.Typer(help="Inspect and edit reference bundles.")
 app.add_typer(bundle_app, name="bundle")
 
 
+def _config():
+    """load_config(), with a bad config.toml or SHOWVENIST_* value as a clean error."""
+    import tomllib
+
+    from pydantic import ValidationError
+
+    from showvenist.config import ConfigError, load_config
+
+    try:
+        return load_config()
+    except ConfigError as e:
+        _fail(f"config: {e}")
+    except tomllib.TOMLDecodeError as e:
+        _fail(f"config: config.toml: {e}")
+    except ValidationError as e:
+        _fail("config: " + "; ".join(
+            f"{'.'.join(str(x) for x in err['loc'])}: {err['msg'].removeprefix('Value error, ')}"
+            for err in e.errors()))
+
+
 def _tmdb():
     from showvenist.adapters.tmdb import TmdbAdapter
-    from showvenist.config import load_config
-
-    key = load_config().tmdb.api_key
+    key = _config().tmdb.api_key
     if not key:
         typer.echo("No TMDB key: set [tmdb] api_key in config.toml or SHOWVENIST_TMDB_API_KEY.",
                    err=True)
@@ -73,9 +91,14 @@ def _run_editor(path: Path) -> int:
     import shlex
     import subprocess
 
-    cmd = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "vi"
+    cmd = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
     try:
-        return subprocess.run([*shlex.split(cmd), str(path)], check=False).returncode
+        argv = shlex.split(cmd) or ["vi"]  # "code --wait", or a quoted path with spaces
+    except ValueError as e:
+        typer.echo(f"cannot parse the editor command {cmd!r}: {e}", err=True)
+        return 127
+    try:
+        return subprocess.run([*argv, str(path)], check=False).returncode
     except OSError as e:
         typer.echo(f"cannot run the editor {cmd!r}: {e}", err=True)
         return 127
@@ -83,7 +106,7 @@ def _run_editor(path: Path) -> int:
 
 @app.command()
 def ingest(
-    show: str = typer.Argument(..., help="Show title"),
+    show: str = typer.Argument(..., help="Show title; with --refresh, a bundle slug or title"),
     ref: list[str] = typer.Option([], "--ref", help="TMDB, TVmaze or IMDb URL/ID"),
     source: str | None = typer.Option(
         None, "--source", help="Sources to fetch, comma-separated (default: [ingest] sources "
@@ -91,8 +114,8 @@ def ingest(
     subs: Path | None = typer.Option(None, "--subs", help="Folder of reference .srt files"),
     year: int | None = typer.Option(None, "--year"),
     tmdb_id: int | None = typer.Option(None, "--tmdb-id"),
-    refresh: bool = typer.Option(False, "--refresh", help="Re-fetch an existing bundle and "
-                                 "show what changed before writing"),
+    refresh: bool = typer.Option(False, "--refresh", help="Re-fetch an existing bundle (by its "
+                                 "stored TMDB id) and show what changed before writing"),
     diff: bool = typer.Option(False, "--diff", help="With --refresh: print the diff and write "
                               "nothing"),
     yes: bool = typer.Option(False, "--yes", help="Skips the y/N before writing a refresh "
@@ -105,7 +128,7 @@ def ingest(
     from showvenist.adapters.tmdb import TmdbError
     from showvenist.bundle import ingest as ing
     from showvenist.bundle.quality import quality_report, render
-    from showvenist.config import IngestConfig, load_config
+    from showvenist.config import IngestConfig
 
     if diff and not refresh:
         _fail("--diff goes with --refresh")
@@ -113,7 +136,7 @@ def ingest(
         _fail("ingest --refresh: no TTY to ask on, so nothing is written; add --yes to write "
               "the refresh, or --diff to only see what would change")
     try:
-        cfg = load_config()
+        cfg = _config()
         sources = (IngestConfig(sources=source.split(",")).sources if source
                    else cfg.ingest.sources)
     except ValidationError as e:
@@ -154,7 +177,9 @@ def _finish_refresh(built, diff_only: bool, yes: bool) -> None:
     from showvenist.bundle.store import bundle_path
 
     d = diff_bundles(built.existing, built.bundle)
-    impact, note = load_history_impact(built.existing, built.bundle, built.slug)
+    impact, note = load_history_impact(
+        built.existing, built.bundle, built.slug,
+        overrides=bundle_path(built.slug, built.root) / "overrides.yaml")
     typer.echo(render_diff(d, impact, note))
     _scan_line(built.scan)
     if diff_only:
@@ -206,7 +231,7 @@ def bundle_edit(
         "as `bundle check` lists them) before opening the editor"),
     root: Path | None = typer.Option(None, "-o", help="Bundle root directory"),
 ) -> None:
-    """Open overrides.yaml in $EDITOR (VISUAL, then vi); validate it on save."""
+    """Open overrides.yaml in $VISUAL (then $EDITOR, then vi); validate it on save."""
     from showvenist.bundle.edit import FixError, edit_overrides
     from showvenist.bundle.overrides import BundleError
     from showvenist.bundle.quality import numbered_conflicts
@@ -263,7 +288,7 @@ def inspect_cmd(
     from showvenist.analysis.cache import AnalysisCache
     from showvenist.analysis.inspect import inspect_card, inspect_file
     from showvenist.bundle.store import load_bundle
-    from showvenist.config import cache_dir, load_config
+    from showvenist.config import cache_dir
 
     adhoc = (card_from, skip, length)
     if not card and (any(x is not None for x in adhoc) or dark):
@@ -316,7 +341,7 @@ def inspect_cmd(
             )
     cache_dir().mkdir(parents=True, exist_ok=True)
     cache = AnalysisCache(cache_dir() / "analysis.db")
-    typer.echo(inspect_file(file, language, vocab, load_config().analysis, cache))
+    typer.echo(inspect_file(file, language, vocab, _config().analysis, cache))
 
 
 def _expand(paths: list[Path]) -> list[Path]:
@@ -779,7 +804,7 @@ def identify(
 
     from showvenist.analysis.cache import AnalysisCache
     from showvenist.bundle.store import bundle_path
-    from showvenist.config import cache_dir, load_config
+    from showvenist.config import cache_dir
     from showvenist.hierarchy.marker import jellyfin_hint, read_marker, suggest_folder_name
     from showvenist.hierarchy.parse import is_duplicate_disc_problem
     from showvenist.report import exit_code, render_tables, to_json
@@ -809,7 +834,7 @@ def identify(
     if do_apply and confirm_token is None and not _interactive():
         _fail("identify --apply: no TTY, so nothing is moved; use --plan to see the moves, or "
               "add --confirm TOKEN (from --plan) or --confirm last to apply them from a script")
-    cfg = load_config()
+    cfg = _config()
     hcfg = cfg.hierarchy
     sig = _parse_signals(signals)
     mode = _llm_mode(llm, cfg, sig)
@@ -1241,7 +1266,7 @@ def assign(
 ) -> None:
     """Record a confirmed match by hand (source manual). Moves or renames the file only with
     --rename."""
-    from showvenist.config import bundles_dir, load_config
+    from showvenist.config import bundles_dir
     from showvenist.eval.harness import resolve_labels
     from showvenist.eval.types import ManifestRow
     from showvenist.hierarchy.marker import ShowResolutionError, read_marker, resolve_show
@@ -1250,7 +1275,7 @@ def assign(
 
     if extra == (episode is not None):
         _fail("assign: give an episode (S02E05) or --extra, not both and not neither")
-    hcfg = load_config().hierarchy
+    hcfg = _config().hierarchy
     show_dir = _show_dir(file.resolve(), hcfg)
     try:
         marker = read_marker(show_dir)
@@ -1318,7 +1343,6 @@ def _assign_rename(file: Path, fp: str, slug: str, bundle, eid: str | None,
     """assign --rename: a one-file plan (pinned, so the match is recorded with source manual
     by the move itself), shown in full, applied after y/N. When the file needs no move, the
     match is recorded as a plain assign."""
-    from showvenist.config import load_config
     from showvenist.hierarchy.parse import parse_disc
     from showvenist.rename.movelog import PlanRefused, apply_plan, recover
     from showvenist.rename.plan import build_plan
@@ -1336,7 +1360,7 @@ def _assign_rename(file: Path, fp: str, slug: str, bundle, eid: str | None,
     from showvenist.state.db import StateDb
     from showvenist.state.history import History
 
-    cfg = load_config()
+    cfg = _config()
     ref = None
     if eid is not None:
         ep = bundle.episode_by_id()[eid]
@@ -1590,7 +1614,7 @@ def eval_cmd(
     analyzed as unlabeled input (a name like show_s01e02 is never a pin here)."""
     from showvenist.analysis.cache import AnalysisCache
     from showvenist.bundle.store import bundle_path, load_bundle
-    from showvenist.config import cache_dir, config_dir, load_config
+    from showvenist.config import cache_dir, config_dir
     from showvenist.eval.fit import fit_loso, format_fit_report, to_weights_config, write_weights
     from showvenist.eval.manifest import read_manifest
     from showvenist.eval.render import (
@@ -1612,7 +1636,7 @@ def eval_cmd(
         _fail("--extras-share must be in [0, 1)")
     if no_blocks and compare_blocks:
         _fail("--no-blocks and --compare-blocks are exclusive (the comparison runs both)")
-    cfg = load_config()
+    cfg = _config()
     sig = _parse_signals(signals)
     mode = _llm_mode(llm, cfg, sig)
     if (manifest is None) == (not from_history):

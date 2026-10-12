@@ -15,7 +15,13 @@ from showvenist.adapters.tmdb import TmdbAdapter
 from showvenist.adapters.tvmaze import TvmazeAdapter, TvmazeError, tvmaze_id_from_ref
 from showvenist.bundle.merge import merge_sources
 from showvenist.bundle.schema import Bundle, PartialBundle
-from showvenist.bundle.store import bundle_path, load_bundle, save_bundle, slugify
+from showvenist.bundle.store import (
+    bundle_path,
+    list_bundles,
+    load_bundle,
+    save_bundle,
+    slugify,
+)
 
 _TMDB_URL = re.compile(r"themoviedb\.org/tv/(\d+)")
 _IMDB_URL = re.compile(r"imdb\.com/title/(tt\d+)")
@@ -90,11 +96,45 @@ def resolve_tvmaze_id(
         cands = tvmaze.search(title, year)
     except TvmazeError as e:
         raise IngestError(f"tvmaze: {e}") from None
-    exact = [c for c in cands if c["title"].casefold() == title.casefold()
-             and (year is None or c["year"] == year)]
+    exact = [c for c in cands if c["title"].casefold() == title.casefold()]
+    if year is not None:
+        # premiere years can differ by one between sources (Babylon 5: 1993 vs 1994)
+        same = [c for c in exact if c["year"] == year]
+        exact = same if len(same) == 1 else [
+            c for c in exact if c["year"] is not None and abs(c["year"] - year) <= 1]
     if len(exact) != 1:
         raise IngestError("tvmaze: ambiguous or not found (pass --ref tvmaze:ID or a TVmaze URL)")
     return exact[0]["tvmaze_id"]
+
+
+def existing_slug(show: str, root: Path | None = None, year: int | None = None) -> str | None:
+    """The bundle `show` names: a slug as given, else the slug its title (and year) give, else
+    the one bundle whose slug is the title's plus a year. Raises IngestError when several are."""
+    if (bundle_path(show, root) / "show.json").exists():
+        return show
+    base = slugify(show)
+    if year is not None and (bundle_path(slugify(show, year), root) / "show.json").exists():
+        return slugify(show, year)
+    found = [s for s in list_bundles(root)
+             if s == base or re.fullmatch(re.escape(base) + r"-\d{4}", s)]
+    if len(found) > 1:
+        raise IngestError(f"{show!r} matches several bundles ({', '.join(found)}); "
+                          "name one by its slug")
+    return found[0] if found else None
+
+
+def _refresh_tmdb_id(old: Bundle, slug: str, tmdb_id: int | None, refs: tuple[str, ...]) -> int:
+    """The TMDB id a refresh fetches: the one stored in the bundle (never a new search, which
+    could land on another show). An explicit id that disagrees is an error."""
+    stored = old.show.ids.tmdb
+    if stored is None:
+        raise IngestError(f"bundle {slug} has no TMDB id to refresh from")
+    given = [tmdb_id] if tmdb_id else []
+    given += [int(m.group(1)) for r in refs if (m := _TMDB_URL.search(r))]
+    if any(g != stored for g in given):
+        raise IngestError(f"bundle {slug} is tmdb:{stored}; --refresh does not switch shows "
+                          "(ingest the other show without --refresh)")
+    return stored
 
 
 @dataclass
@@ -126,8 +166,20 @@ def build(
     tvmaze: TvmazeAdapter | None = None,
 ) -> Built:
     """Fetch the sources and merge them in memory. Writes nothing. TMDB is primary and required
-    (its errors propagate); a secondary that fails or can't find the show is a warning."""
-    tid = resolve_tmdb_id(tmdb, show, year, tmdb_id, refs, pick)
+    (its errors propagate); a secondary that fails or can't find the show is a warning, except
+    on a refresh of a bundle that has data from it (dropping that silently would be a loss).
+    With `refresh`, `show` names an existing bundle (slug or title) and its stored TMDB id is
+    fetched; the bundle keeps its slug."""
+    old: Bundle | None = None
+    if refresh:
+        found = existing_slug(show, root, year)
+        if found is None:
+            raise IngestError(f"no bundle {show!r} to refresh in {bundle_path('', root)}; "
+                              "ingest it without --refresh first")
+        old = load_bundle(found, root, apply_overrides=False)
+        tid = _refresh_tmdb_id(old, found, tmdb_id, refs)
+    else:
+        tid = resolve_tmdb_id(tmdb, show, year, tmdb_id, refs, pick)
     partial = tmdb.fetch(tid)
     if partial.show is None:
         raise IngestError("TMDB returned no show data")
@@ -138,15 +190,15 @@ def build(
         provenance=partial.provenance,
         series_cast=partial.series_cast,
     )
-    slug = slugify(bundle.show.title, bundle.show.year)
-    existing_path = bundle_path(slug, root) / "show.json"
-    old: Bundle | None = None
-    if existing_path.exists():
-        if not refresh:
+    if old is None:
+        slug = slugify(bundle.show.title, bundle.show.year)
+        existing_path = bundle_path(slug, root) / "show.json"
+        if existing_path.exists():
             raise IngestError(
                 f"{existing_path} exists; bundles never update silently. Re-run with --refresh."
             )
-        old = load_bundle(slug, root, apply_overrides=False)
+    else:
+        slug = found
         # carry reference subtitles forward: the files stay in subs/
         old_eps = {e.id: e for e in old.episodes}
         for ep in bundle.episodes:
@@ -166,6 +218,11 @@ def build(
             except TvmazeError as e:
                 raise IngestError(f"tvmaze: {e}") from None
         except IngestError as e:
+            if old is not None and old.show.ids.tvmaze:
+                raise IngestError(
+                    f"{e}; the bundle has TVmaze data (tvmaze:{old.show.ids.tvmaze}), so the "
+                    "refresh stops rather than drop it. Try again later, or pass --source tmdb "
+                    "to drop it on purpose") from None
             warnings.append(f"{e}; the bundle has no TVmaze data")
     if secondaries:
         bundle = merge_sources(bundle, secondaries)
@@ -193,7 +250,7 @@ def commit(built: Built) -> Path:
         tmp = d / ".show.json.prev.tmp"
         shutil.copy2(cur, tmp)
         os.replace(tmp, prev)
-    return save_bundle(bundle, built.root).parent
+    return save_bundle(bundle, built.root, slug=built.slug).parent
 
 
 def ingest(

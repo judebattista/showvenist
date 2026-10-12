@@ -103,7 +103,8 @@ class TvmazeAdapter:
             if "id" not in s:
                 continue
             y = _year(s.get("premiered"))
-            if year is not None and y is not None and y != year:
+            # premiere years can differ by one between sources (Babylon 5: 1993 vs 1994)
+            if year is not None and y is not None and abs(y - year) > 1:
                 continue
             out.append(
                 {

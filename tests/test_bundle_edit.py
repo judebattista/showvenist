@@ -59,7 +59,7 @@ def make_editor(tmp_path: Path, body: str) -> str:
 
 
 def edit(root, *args, editor: str | None = None, input=None, monkeypatch=None):
-    env = {"EDITOR": editor} if editor else {}
+    env = {"EDITOR": editor, "VISUAL": None} if editor else {}
     return runner.invoke(cli.app, ["bundle", "edit", SLUG, "-o", str(root), *args],
                          env=env, input=input)
 
@@ -97,7 +97,7 @@ def test_apply_fix_then_editor_sees_it_and_result_loads(root, tmp_path):
     ed = make_editor(tmp_path, "pathlib.Path(os.environ['SEEN']).write_text(p.read_text())\n")
     seen = tmp_path / "seen.txt"
     r = runner.invoke(cli.app, ["bundle", "edit", SLUG, "--apply-fix", "2", "-o", str(root)],
-                      env={"EDITOR": ed, "SEEN": str(seen)})
+                      env={"EDITOR": ed, "VISUAL": None, "SEEN": str(seen)})
     assert r.exit_code == 0, r.output
     assert "new_episodes:" in seen.read_text() and "# Overrides for this show" in seen.read_text()
     b = load_bundle(SLUG, root)  # overrides.yaml loads
@@ -234,6 +234,71 @@ def test_editor_falls_back_to_visual(root, tmp_path, monkeypatch):
     r = runner.invoke(cli.app, ["bundle", "edit", SLUG, "-o", str(root)])
     assert r.exit_code == 0
     assert (bundle_path(SLUG, root) / "overrides.yaml").read_text() == "# via visual\n"
+
+
+def test_visual_wins_over_editor_and_takes_arguments(root, tmp_path, monkeypatch):
+    d = tmp_path / "my editors"
+    d.mkdir()
+    script = d / "ed.py"
+    script.write_text("import sys, pathlib\n"
+                      "pathlib.Path(sys.argv[-1]).write_text('# ' + sys.argv[1] + '\\n')\n")
+    monkeypatch.setenv("VISUAL", f"{os.sys.executable} '{script}' --flag")
+    monkeypatch.setenv("EDITOR", "false")
+    r = runner.invoke(cli.app, ["bundle", "edit", SLUG, "-o", str(root)])
+    assert r.exit_code == 0, r.output
+    assert (bundle_path(SLUG, root) / "overrides.yaml").read_text() == "# --flag\n"
+
+
+def test_apply_fix_without_final_newline():
+    b = two_season_split_bundle()
+    existing = 'new_episodes:\n  "custom:x":\n    title: Mine\n    runtime_min: 5'
+    out, _ = apply_fix(existing, split_fixes(b)[0])
+    assert out.startswith(existing + "\n")
+    doc = yaml.safe_load(out)
+    assert doc["new_episodes"]["custom:x"] == {"title": "Mine", "runtime_min": 5}
+    assert set(doc["new_episodes"]) == {"custom:x", "custom:tvmaze-501", "custom:tvmaze-508"}
+    assert out.endswith("\n")
+    apply_overrides(b, _write(out))
+
+
+@pytest.mark.parametrize("text", ["episodes: [oops\n", "episodes: {}\n---\norderings: {}\n"],
+                         ids=["malformed", "two-documents"])
+def test_apply_fix_invalid_yaml_is_a_clean_error(root, text):
+    with pytest.raises(FixError, match="not valid YAML"):
+        apply_fix(text, split_fixes(two_season_split_bundle())[0])
+    ov = bundle_path(SLUG, root) / "overrides.yaml"
+    ov.write_text(text)
+    r = edit(root, "--apply-fix", "2", editor="true")
+    assert r.exit_code == 1 and "not valid YAML" in r.output
+    assert r.exception is None or isinstance(r.exception, SystemExit)
+    assert ov.read_text() == text
+
+
+def test_apply_fix_keeps_a_section_trailing_comment_before_the_new_lines():
+    b = two_season_split_bundle()
+    existing = textwrap.dedent("""\
+        new_episodes:
+          "custom:x": { title: "Mine" }
+          # about custom:x
+
+        # top-level note
+        episodes: {}
+        """)
+    out, _ = apply_fix(existing, split_fixes(b)[0])
+    lines = out.splitlines()
+    assert lines.index("  # about custom:x") == 2
+    assert lines.index("  custom:tvmaze-501:") > 2
+    assert lines.index("# top-level note") > lines.index("  custom:tvmaze-508:")
+
+
+def test_apply_fix_keeps_crlf(root, tmp_path):
+    ov = bundle_path(SLUG, root) / "overrides.yaml"
+    ov.write_bytes(b'# mine\r\nepisodes:\r\n  "tmdb:100":\r\n    runtime_min: 40\r\n')
+    r = edit(root, "--apply-fix", "2", editor="true")
+    assert r.exit_code == 0, r.output
+    data = ov.read_bytes()
+    assert b"new_episodes:\r\n" in data and b"\n" not in data.replace(b"\r\n", b"")
+    assert "custom:tvmaze-501" in load_bundle(SLUG, root).episode_by_id()
 
 
 def test_edit_overrides_seam_with_callables(root):

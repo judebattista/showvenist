@@ -331,3 +331,64 @@ def test_numeral_titles_pair_within_three_days_not_a_week():
     assert out.episode_by_id()["tmdb:101"].alt_titles == [TITLES[1]]
     assert [c["primary"] for c in conflicts(out, "unaligned_primary")] == ["tmdb:100", "tmdb:102"]
     assert [c["secondary"] for c in conflicts(out, "unaligned_secondary")] == ["tvmaze:505"]
+
+
+def test_split_part_marker_between_title_halves():
+    assert split_part("Into the Orchard Part I: Lambs") == ("into the orchard lambs", 1)
+    assert split_part("Into the Orchard - Lambs (1)") == ("into the orchard lambs", 1)
+    assert split_part("Part 2: Lambs") is None
+
+
+def test_different_part_numbers_never_pair():
+    # the secondary lacks part 1 and dates part 2 on part 1's night: the shared base must not
+    # pair part 1 with part 2's data
+    P = primary([(1, 1, p_ep(0, title="Silver Kettle (1)")),
+                 (1, 2, p_ep(1, title="Silver Kettle (2)")), (1, 3, p_ep(2))])
+    S = secondary([(1, 1, s_ep(1, title="Silver Kettle (2)", air_date=day(0))), (1, 2, s_ep(2))])
+    out = merge_sources(P, [S])
+    ids = out.episode_by_id()
+    assert len(ids["tmdb:100"].synopses) == 1
+    assert ids["tmdb:101"].synopses[-1].text == "secondary synopsis 1"
+    assert [c["primary"] for c in conflicts(out, "unaligned_primary")] == ["tmdb:100"]
+
+
+def test_no_split_when_the_primary_already_has_the_parts():
+    # shape of Cowboy Bebop: both sources have parts 1 and 2, the secondary numbers and dates
+    # them elsewhere; that is two pairs, not a split with a harmful fix
+    P = primary([(1, 1, p_ep(0)), (1, 2, p_ep(1, title="Silver Kettle (1)")),
+                 (1, 3, p_ep(2, title="Silver Kettle (2)")), (1, 4, p_ep(3))])
+    S = secondary([(1, 1, s_ep(0)), (1, 2, s_ep(3)),
+                   (1, 3, s_ep(1, title="Silver Kettle (Part 1)", air_date=day(30))),
+                   (1, 4, s_ep(2, title="Silver Kettle (Part 2)", air_date=day(31)))])
+    out = merge_sources(P, [S])
+    assert conflicts(out, "split") == []
+    assert conflicts(out, "unaligned_primary") == conflicts(out, "unaligned_secondary") == []
+    ids = out.episode_by_id()
+    assert ids["tmdb:101"].synopses[-1].text == "secondary synopsis 1"
+    assert ids["tmdb:102"].synopses[-1].text == "secondary synopsis 2"
+    assert len(conflicts(out, "air_date")) == 2
+    assert merge_sources(out, [S]).model_dump() == out.model_dump()
+
+
+def test_unique_identical_title_pairs_whatever_the_dates():
+    far = (date.fromisoformat(day(1)) + timedelta(days=100)).isoformat()
+    P = primary([(1, k + 1, p_ep(k)) for k in range(4)])
+    S = secondary([(1, 1, s_ep(0)), (1, 2, s_ep(2)), (1, 3, s_ep(3)),
+                   (1, 4, s_ep(1, air_date=far))])  # moved to the end and dated 100 days later
+    out = merge_sources(P, [S])
+    assert conflicts(out, "unaligned_primary") == conflicts(out, "unaligned_secondary") == []
+    assert out.episode_by_id()["tmdb:101"].synopses[-1].text == "secondary synopsis 1"
+    assert [c["primary"] for c in conflicts(out, "air_date")] == ["tmdb:101"]
+    assert merge_sources(out, [S]).model_dump() == out.model_dump()
+
+
+def test_identical_title_far_apart_needs_uniqueness():
+    # two secondary episodes carry the title: no date evidence, so neither pairs
+    far = (date.fromisoformat(day(1)) + timedelta(days=100)).isoformat()
+    farther = (date.fromisoformat(day(1)) + timedelta(days=200)).isoformat()
+    P = primary([(1, 1, p_ep(0)), (1, 2, p_ep(1))])
+    S = secondary([(1, 1, s_ep(0)), (2, 1, s_ep(1, air_date=far)),
+                   (2, 2, s_ep(9, title=TITLES[1], air_date=farther))])
+    out = merge_sources(P, [S])
+    assert [c["primary"] for c in conflicts(out, "unaligned_primary")] == ["tmdb:101"]
+    assert len(out.episode_by_id()["tmdb:101"].synopses) == 1

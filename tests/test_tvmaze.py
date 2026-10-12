@@ -49,6 +49,9 @@ def test_search():
     assert len(res) == 2
     assert reqs[0].url.params["q"] == "Quillfeather Academy"
     assert [r["tvmaze_id"] for r in ad.search("Quillfeather Academy", 2020)] == [9002]
+    # premiere years may differ by one between sources
+    assert [r["tvmaze_id"] for r in ad.search("Quillfeather Academy", 2012)] == [9001]
+    assert ad.search("Quillfeather Academy", 2013) == []
 
 
 def test_fetch_mapping():

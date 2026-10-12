@@ -91,6 +91,18 @@ def test_field_changes_counts_and_examples():
     assert "Title changed (6):" in text and "… and 3 more" in text
 
 
+def test_alt_titles_added_and_removed():
+    old = primary(eps(0))
+    old.episodes[0].alt_titles = ["Gone", "Kept"]
+    new = old.model_copy(deep=True)
+    new.episodes[0].alt_titles = ["Kept", "Fresh"]
+    d = diff_bundles(old, new)
+    assert d.changes["alt_titles"].count == 1
+    assert "+ 'Fresh'; - 'Gone'" in d.changes["alt_titles"].examples[0]
+    new.episodes[0].alt_titles = []
+    assert "- 'Gone', 'Kept'" in diff_bundles(old, new).changes["alt_titles"].examples[0]
+
+
 def test_subtitles_added():
     from showvenist.bundle.schema import SubtitleRef
 
@@ -180,6 +192,59 @@ def test_load_history_impact_without_db_or_outdated(tmp_path):
     con.close()
     rows, note = load_history_impact(b, b, "x", p)
     assert rows == [] and "not checked" in note
+
+
+def test_load_history_impact_newer_schema_is_a_note(tmp_path):
+    import sqlite3
+
+    b = primary(eps(0))
+    p = tmp_path / "new.db"
+    con = sqlite3.connect(p)
+    con.execute("PRAGMA user_version=999")
+    con.commit()
+    con.close()
+    rows, note = load_history_impact(b, b, "x", p)
+    assert rows == [] and "not checked" in note and "999" in note
+
+
+OVERRIDES = """\
+new_episodes:
+  "custom:x": { title: "Extra half" }
+orderings:
+  disk:
+    - { season: 1, episode: 1, episode_id: "tmdb:100" }
+    - { season: 1, episode: 2, episode_id: "custom:x" }
+"""
+
+
+def test_load_history_impact_applies_overrides_to_both_bundles(tmp_path):
+    db = StateDb(tmp_path / "state.db")
+    h = History(db)
+    h.touch_file("f1", size=1, path="/lib/a.mkv")
+    h.confirm("f1", "testshow-2010", episode_id="custom:x", season=1, episode=2, title=None,
+              source="manual", run_id=None)
+    db.close()
+    ov = tmp_path / "overrides.yaml"
+    ov.write_text(OVERRIDES)
+    old, new = primary(eps(0, 1)), primary(eps(0, 1))
+    rows, note = load_history_impact(old, new, "testshow-2010", tmp_path / "state.db")
+    assert [r.new for r in rows] == ["removed"]  # without overrides custom:x looks removed
+    rows, note = load_history_impact(old, new, "testshow-2010", tmp_path / "state.db",
+                                     overrides=ov)
+    assert rows == [] and note is None
+    # the refreshed bundle drops tmdb:100, so the override ordering renumbers nothing but
+    # disk keeps custom:x at S01E02: still unaffected
+    rows, _ = load_history_impact(old, primary(eps(1)), "testshow-2010",
+                                  tmp_path / "state.db", overrides=ov)
+    assert rows == []
+    # overrides that no longer load over the refreshed bundle: compared without, with a note
+    clash = primary(eps(0, 1))
+    clash.episodes.append(p_ep(7).model_copy(update={"id": "custom:x"}))
+    rows, note = load_history_impact(old, clash, "testshow-2010", tmp_path / "state.db",
+                                     overrides=ov)
+    assert "does not apply to the refreshed bundle" in note
+    assert "History impact: overrides.yaml does not apply" in render_diff(
+        diff_bundles(old, clash), rows, note)
 
 
 def test_load_history_impact_reads_real_db(tmp_path):

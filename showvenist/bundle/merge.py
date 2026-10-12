@@ -51,6 +51,9 @@ AIR_DATE_CONFLICT_DAYS = 3
 SPLIT_TITLE_MIN = 80.0  # primary title vs the parts' shared base
 SPLIT_RUNTIME_TOL = 0.1  # parts' runtimes sum to the primary's within 10% (at least 2 min)
 SPLIT_ORDERING = "aired-split"
+# Fallback pass: a title this close that matches exactly one episode on each side pairs whatever
+# the air dates say (the sources date the episode differently, e.g. a later dub or rerun).
+UNIQUE_TITLE_MIN = 95.0
 
 # uppercase only: "Mix" or "Liv" is a word, "MIX" on TMDB is a numeral
 _ROMAN = re.compile(r"^M{0,3}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})$")
@@ -75,6 +78,12 @@ _PART = re.compile(
     r"^(?P<base>.+?)[\s,:;.–—-]*"
     rf"(?:\(\s*(?:part|pt\.?)?\s*(?P<n1>{_PART_NUM})(?:\s*of\s*\d+)?\s*\)"
     rf"|\b(?:part|pt\.?)\s+(?P<n2>{_PART_NUM})(?:\s*of\s*\d+)?)\s*$",
+    re.I,
+)
+# "Into the Lion's Den Part I: Lambs to the Slaughter": the marker between two halves of the title
+_PART_MID = re.compile(
+    rf"^(?P<pre>.*?\w.*?)[\s,;.–—-]*\b(?:part|pt\.?)\s+(?P<n>{_PART_NUM})\s*[:–—-]\s*"
+    r"(?P<post>.*\w.*)$",
     re.I,
 )
 _WORDNUM = {w: i + 1 for i, w in enumerate(_NUMWORDS.split("|"))}
@@ -111,15 +120,27 @@ def _part_number(tok: str) -> int | None:
     return total
 
 
+def _part_parts(title: str) -> tuple[str, int] | None:
+    """(display base, part number) of a title with a part marker at the end or between two
+    halves ('X Part I: Y' -> 'X: Y'); None without one."""
+    t = (title or "").strip()
+    if m := _PART.match(t):
+        return m.group("base").strip(" ,:;.-–—"), _part_number(m.group("n1") or m.group("n2"))
+    if m := _PART_MID.match(t):
+        pre, post = m.group("pre").strip(" ,:;.-–—"), m.group("post").strip()
+        return f"{pre}: {post}", _part_number(m.group("n"))
+    return None
+
+
 def split_part(title: str) -> tuple[str, int] | None:
     """'The Birth of Evil (1)' -> ('the birth of evil', 1); None without a part marker."""
-    m = _PART.match((title or "").strip())
-    if not m:
+    found = _part_parts(title)
+    if found is None:
         return None
-    base = normalize_title(m.group("base"))
+    base = normalize_title(found[0])
     if not base:
         return None
-    return base, _part_number(m.group("n1") or m.group("n2"))
+    return base, found[1]
 
 
 def _ordinal(d: str | None) -> int | None:
@@ -135,7 +156,7 @@ class _Ep:
     season: int
     number: int
     informative: bool
-    titles: list[str]  # normalized: title (+ alt titles on the primary side; + base on the other)
+    titles: list[str]  # normalized: title, alt titles, and the part base ("alpha" of "Alpha (1)")
     part: tuple[str, int] | None
     day: int | None
 
@@ -182,9 +203,22 @@ def _title_matrix(ps: list[_Ep], ss: list[_Ep]) -> np.ndarray:
     return out
 
 
+def _titles(ps: list[_Ep], ss: list[_Ep]) -> np.ndarray:
+    """_title_matrix, except that two titles carrying different part numbers ("Alpha (1)" and
+    "Alpha (2)") score 0: their shared base only counts when one side has no part marker."""
+    out = _title_matrix(ps, ss)
+    for i, p in enumerate(ps):
+        if p.part is None:
+            continue
+        for j, s in enumerate(ss):
+            if s.part is not None and s.part[1] != p.part[1]:
+                out[i, j] = 0.0
+    return out
+
+
 def _scores(ps: list[_Ep], ss: list[_Ep]) -> tuple[np.ndarray, np.ndarray]:
     """Pair scores (primary x secondary) and the raw title ratios (NaN = no title evidence)."""
-    titles = _title_matrix(ps, ss)
+    titles = _titles(ps, ss)
     sc = np.where(
         np.isnan(titles), 0.0,
         np.clip((np.nan_to_num(titles) - TITLE_PIVOT) / 10.0, TITLE_MIN, TITLE_MAX),
@@ -270,10 +304,26 @@ def _near(p: _Ep, parts: list[_Ep]) -> bool:
     )
 
 
-def _split_ok(p: _Ep, parts: list[_Ep]) -> str | None:
-    """'base' or 'runtime' when `parts` look like the pieces of `p`, else None."""
+def _title_owners(ps: list[_Ep]) -> dict[str, set[str]]:
+    """Part base -> ids of the primary episodes whose title is a part of it."""
+    out: dict[str, set[str]] = {}
+    for p in ps:
+        if p.part is not None:
+            out.setdefault(p.part[0], set()).add(p.ep.id)
+    return out
+
+
+def _split_ok(p: _Ep, parts: list[_Ep], owners: dict[str, set[str]]) -> str | None:
+    """'base' or 'runtime' when `parts` look like the pieces of `p`, else None. Never when `p` is
+    itself one part of a multi-part episode, or when another primary episode is a part of the
+    parts' base: the primary already has the parts (Bebop's "Jupiter Jazz (1)" and "(2)")."""
+    if p.part is not None:
+        return None
     bases = [s.part for s in parts]
-    if all(bases) and len({b[0] for b in bases}) == 1:
+    shared = all(bases) and len({b[0] for b in bases}) == 1
+    if shared and owners.get(bases[0][0], set()) - {p.ep.id}:
+        return None
+    if shared:
         nums = [b[1] for b in bases]
         if nums == list(range(nums[0], nums[0] + len(nums))):
             base = bases[0][0]
@@ -287,7 +337,9 @@ def _split_ok(p: _Ep, parts: list[_Ep]) -> str | None:
     return None
 
 
-def _find_split(p: _Ep, run: list[int], anchor: int | None, ss: list[_Ep]) -> list[int] | None:
+def _find_split(
+    p: _Ep, run: list[int], anchor: int | None, ss: list[_Ep], owners: dict[str, set[str]]
+) -> list[int] | None:
     """Consecutive secondary indices from `run` (containing `anchor` if given) that split `p`;
     the longest window wins, then the earliest."""
     best: list[int] | None = None
@@ -296,7 +348,7 @@ def _find_split(p: _Ep, run: list[int], anchor: int | None, ss: list[_Ep]) -> li
             win = run[start:start + length]
             if anchor is not None and anchor not in win:
                 continue
-            if _split_ok(p, [ss[k] for k in win]):
+            if _split_ok(p, [ss[k] for k in win], owners):
                 best = win
                 break
         if best:
@@ -309,6 +361,7 @@ def _detect_splits(
 ) -> tuple[list[tuple[int, list[int]]], list[tuple[int, int]]]:
     """Primary episodes matched by two or more consecutive secondary episodes."""
     p2s = dict(pairs)
+    owners = _title_owners(ps)
     s_used = {j for _, j in pairs}
     consumed: set[int] = set()
     splits: list[tuple[int, list[int]]] = []
@@ -332,7 +385,7 @@ def _detect_splits(
             anchor = None
         if len(run) < 2:
             continue
-        win = _find_split(p, run, anchor, ss)
+        win = _find_split(p, run, anchor, ss, owners)
         if win and all(b - a == 1 for a, b in zip(win, win[1:], strict=False)):
             splits.append((i, win))
             consumed.update(win)
@@ -350,6 +403,7 @@ def _unordered_splits(
     matches the primary's title (or, for an uninformative primary title, aired within days)."""
     out: list[tuple[int, list[int]]] = []
     used: set[int] = set()
+    owners = _title_owners(ps)
     for i, p in enumerate(ps):
         if i in done_p:
             continue
@@ -364,7 +418,7 @@ def _unordered_splits(
                    and ss[k + 1].part is not None and ss[k + 1].part[0] == ss[j].part[0]):
                 k += 1
             win = list(range(j, k + 1))
-            if len(win) >= 2 and _split_ok(p, [ss[x] for x in win]) == "base":
+            if len(win) >= 2 and _split_ok(p, [ss[x] for x in win], owners) == "base":
                 best = win
                 break
             j = k + 1
@@ -545,20 +599,27 @@ def _merge_one(
         left_p += [p for i, p in enumerate(ps) if i not in done_p]
         left_s += [s for j, s in enumerate(ss) if j not in done_s]
 
-    # Episodes one source places elsewhere (specials inside a season, a moved episode):
-    # unordered, strong informative title match only.
+    # Episodes one source places elsewhere (specials inside a season, a moved episode) or dates
+    # differently: unordered, strong informative title match only. A near-identical title that
+    # is unique on both sides (across the whole show) pairs first, whatever the dates say.
     if left_p and left_s:
         sc, titles = _scores(left_p, left_s)
+        full = np.nan_to_num(_titles(P, S), nan=0.0) >= UNIQUE_TITLE_MIN
+        row_n, col_n = full.sum(axis=1), full.sum(axis=0)
+        pk = {id(p): k for k, p in enumerate(P)}
+        sk = {id(s): k for k, s in enumerate(S)}
         cands = sorted(
-            (-float(sc[i, j]), i, j)
+            (0 if uniq else 1, -float(sc[i, j]), i, j)
             for i, p in enumerate(left_p)
             for j, s in enumerate(left_s)
-            if sc[i, j] >= SPECIAL_MIN
-            and not np.isnan(titles[i, j]) and titles[i, j] >= SPECIAL_TITLE_MIN
+            for uniq in [bool(full[pk[id(p)], sk[id(s)]]) and row_n[pk[id(p)]] == 1
+                         and col_n[sk[id(s)]] == 1]
+            if uniq or (sc[i, j] >= SPECIAL_MIN
+                        and not np.isnan(titles[i, j]) and titles[i, j] >= SPECIAL_TITLE_MIN)
         )
         used_p: set[int] = set()
         used_s: set[int] = set()
-        for _, i, j in cands:
+        for _, _, i, j in cands:
             if i in used_p or j in used_s:
                 continue
             used_p.add(i)
@@ -602,7 +663,7 @@ def _merge_one(
         for sp in group:
             base = sp.parts[0].part
             if base and all(s.part and s.part[0] == base[0] for s in sp.parts):
-                title = _PART.match(sp.parts[0].ep.title.strip()).group("base").strip(" ,:;.-")
+                title = _part_parts(sp.parts[0].ep.title)[0]
                 ep = merged[sp.p.ep.id]
                 if normalize_title(title) not in {normalize_title(t)
                                                   for t in [ep.title, *ep.alt_titles]}:

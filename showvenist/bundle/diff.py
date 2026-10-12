@@ -6,6 +6,7 @@ never writes. `render_diff` makes concise text: counts plus short lists.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -135,8 +136,11 @@ def _compare_episode(d: BundleDiff, o: Episode, n: Episode) -> None:
     if o.title != n.title:
         add("title", f"{_short(o.title)} -> {_short(n.title)}")
     new_alts = [t for t in n.alt_titles if t not in o.alt_titles]
-    if new_alts:
-        add("alt_titles", "+ " + ", ".join(_short(t) for t in new_alts))
+    gone_alts = [t for t in o.alt_titles if t not in n.alt_titles]
+    if new_alts or gone_alts:
+        add("alt_titles", "; ".join(
+            sign + " " + ", ".join(_short(t) for t in alts)
+            for sign, alts in (("+", new_alts), ("-", gone_alts)) if alts))
     os_, ns = _syn(o), _syn(n)
     if os_ != ns:
         parts = [f"+{src}" for src in ns if src not in os_]
@@ -235,22 +239,51 @@ def _path(hist: Any, fingerprint: str) -> str:
     return f.last_path if f is not None else f"(fingerprint {fingerprint[:12]})"
 
 
+def _overridden(bundle: Bundle, path: Path) -> Bundle:
+    """`bundle` with overrides.yaml applied, quietly (vanished-episode warnings are printed
+    after the refresh is written). Raises BundleError."""
+    from showvenist.bundle.overrides import apply_overrides
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return apply_overrides(bundle, path)
+
+
 def load_history_impact(
-    old: Bundle, new: Bundle, slug: str, db_path: Path | str | None = None
+    old: Bundle,
+    new: Bundle,
+    slug: str,
+    db_path: Path | str | None = None,
+    overrides: Path | None = None,
 ) -> tuple[list[ImpactRow], str | None]:
-    """Open state.db read-only and compute the impact. No state.db, or one that needs an
-    upgrade, gives ([], note)."""
+    """Open state.db read-only and compute the impact. Matches were made against the bundle
+    with its overrides, so `overrides` (overrides.yaml, if it exists) is applied to both
+    bundles first: `custom:` episodes and override orderings are then compared too. No
+    state.db, or one that needs an upgrade or is newer, gives ([], note)."""
+    from showvenist.bundle.overrides import BundleError
     from showvenist.state.db import SchemaOutdated, StateDb, StateDbMissing
     from showvenist.state.history import History
+    from showvenist.state.migrations import SchemaTooNew
 
     try:
         db = StateDb.open_readonly(db_path)
     except StateDbMissing:
         return [], "no history yet (no state.db)"
-    except SchemaOutdated as e:
+    except (SchemaOutdated, SchemaTooNew) as e:
         return [], f"history not checked: {e}"
+    note = None
     try:
-        return history_impact(old, new, History(db), slug), None
+        if overrides is not None and overrides.exists():
+            try:
+                old = _overridden(old, overrides)
+            except BundleError as e:
+                return [], f"history not checked: {e}"
+            try:
+                new = _overridden(new, overrides)
+            except BundleError as e:
+                note = (f"overrides.yaml does not apply to the refreshed bundle ({e}); "
+                        "compared without it, so its episodes and orderings show as removed")
+        return history_impact(old, new, History(db), slug), note
     finally:
         db.close()
 
@@ -301,9 +334,9 @@ def render_diff(
     if impact:
         section(f"History impact ({len(impact)} confirmed matches):",
                 [f"{r.path}: {r.old} -> {r.new} ({r.episode_id})" for r in impact])
-    elif note:
+    if note:
         out.append(f"History impact: {note}")
-    else:
+    elif not impact:
         out.append("History impact: none")
     return "\n".join(out)
 

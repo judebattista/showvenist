@@ -9,6 +9,10 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
+class ConfigError(ValueError):
+    """A configuration value that can't be used; the message names where it came from."""
+
+
 class _Section(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -173,9 +177,13 @@ def load_config(path: Path | None = None, env: dict[str, str] | None = None) -> 
                 val = [v.strip() for v in val.split(",") if v.strip()]
             elif isinstance(current, bool):
                 val = val.lower() in ("1", "true", "yes", "on")
-            elif isinstance(current, int):
-                val = int(val)
-            elif isinstance(current, float):
-                val = float(val)
+            elif isinstance(current, int | float):
+                kind = type(current)
+                try:
+                    val = kind(val)
+                except ValueError:
+                    raise ConfigError(
+                        f"SHOWVENIST_{name}_{field}".upper() + f"={val!r}: expected "
+                        f"{'an integer' if kind is int else 'a number'}") from None
             setattr(section, field, val)
     return Config.model_validate(cfg.model_dump())
