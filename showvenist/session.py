@@ -952,16 +952,9 @@ class Session:
         return sol, confs
 
     def _row_titles(self) -> list[int | None]:
-        """MakeMKV title index per row (§11.5): from the file name; a row with duplicates takes
-        the lowest index among its copies (MakeMKV lists the main title first)."""
-        rows = self.rows
-        out = [parse_title_index(f.path.name) for f in rows]
-        row_of = {f.path: r for r, f in enumerate(rows)}
-        for dup, primary in self.duplicates.items():
-            r, t = row_of.get(primary), parse_title_index(dup.name)
-            if r is not None and t is not None and (out[r] is None or t < out[r]):
-                out[r] = t
-        return out
+        """MakeMKV title index per row (§11.5): from the file's own name. A copy's index does
+        not move its twin: on Burn Notice S01 disc 3 the copy sits in an earlier title group."""
+        return [parse_title_index(f.path.name) for f in self.rows]
 
     def _title_evidence(
         self, discs: list[DiscSpec], titles: list[int | None], sol: BlockSolution,
