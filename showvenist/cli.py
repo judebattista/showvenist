@@ -574,6 +574,7 @@ def _input_tree(paths: list[Path], hcfg, tag_of):
         out.problems += t.problems
         out.disagreements += t.disagreements
         out.ignored += t.ignored
+        out.extras += t.extras
         for s in t.seasons:
             have = by_num.get(s.number)
             if have is None:
@@ -589,6 +590,8 @@ def _input_tree(paths: list[Path], hcfg, tag_of):
                     have.discs.append(d)
             known = {f.path for f in have.loose}
             have.loose += [f for f in s.loose if f.path not in known]
+            known = {f.path for f in have.extras}
+            have.extras += [f for f in s.extras if f.path not in known]
     from showvenist.hierarchy.parse import disc_sort_key
 
     _mark_duplicates(out)
@@ -664,9 +667,17 @@ def format_tree(tree, slug: str | None = None, show_name: str | None = None) -> 
             lines.append(f"    {num:<8} {src}: {files_line(d.files)}{order}")
         if s.loose:
             lines.append(f"    no disc  {files_line(s.loose)}")
+        if s.extras:
+            n = len(s.extras)
+            lines.append(f"    extras   {n} file{'s' if n != 1 else ''} already in an extras "
+                         "folder (left as they are)")
         for f in allf:
             if not f.ready:
                 lines.append(f"      not ready: {f.path.name} ({f.not_ready_reason})")
+    if tree.extras:
+        n = len(tree.extras)
+        lines.append(f"  extras: {n} file{'s' if n != 1 else ''} in a show-level extras folder "
+                     "(left as they are)")
     for ig in tree.ignored:
         lines.append(f"Skipping {ig.name}: it has a .showvenist-ignore file")
     if tree.problems:
@@ -1478,7 +1489,8 @@ def undo(
     yes: bool = typer.Option(False, "--yes", help="Do not ask before moving files back"),
 ) -> None:
     """Reverse an applied rename run: shows its moves, asks y/N, moves files back in reverse
-    order; the run's matches become undone (§13.5). Never overwrites; folders stay."""
+    order; the run's matches become undone (§13.5). Never overwrites; a folder the run created
+    (extras/) is removed only when it is empty afterwards."""
     from showvenist.rename.render import format_ops, format_recovery, format_undo
     from showvenist.rename.undo import undo_run
     from showvenist.state.db import StateDb, state_db_path

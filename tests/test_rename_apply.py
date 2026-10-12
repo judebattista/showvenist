@@ -227,7 +227,9 @@ def test_undo_round_trip(tmp_path):
     assert [o.kind for o in u.undone] == ["duplicate", "extra", "episode", "episode", "sidecar"]
     files1, dirs1 = snapshot(s)
     assert files1 == files0  # every file back where it was, byte for byte
-    assert dirs0 <= dirs1 and "extras" in dirs1  # the created folder stays
+    # the extras/ folder the run created is empty again: undo removes it (sv-g7y)
+    assert dirs1 == dirs0 and "extras" not in dirs1
+    assert u.removed_dirs == [s / "extras"]
     assert statuses(db) == ["undone"] * 5
     assert {r[0] for r in db.conn.execute("select status from match")} == {"undone"}
     assert [r[0] for r in db.conn.execute("select command from run order by id")] == ["c", "undo"]

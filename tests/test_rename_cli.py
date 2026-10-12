@@ -181,7 +181,7 @@ def test_assign_rename(tmp_path, monkeypatch):
     assert runner.invoke(cli.app, ["undo", "--yes"]).exit_code == 0
     assert runner.invoke(cli.app, ["undo", "--yes"]).exit_code == 0
     assert sorted(p.name for p in rips.iterdir() if p.is_file()) == ["t01.mkv", "t02.mkv"]
-    assert (rips / "extras").is_dir()  # created folders stay
+    assert not (rips / "extras").exists()  # the empty folder the run created goes (sv-g7y)
 
 
 def test_duplicate_rank_follows_quality_then_path(tmp_path):

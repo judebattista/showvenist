@@ -13,8 +13,11 @@ Choices:
   undone before (no `run` row with command `undo` for it). A run whose undo skipped some moves
   therefore stops being "the last one": those leftovers are retried only by naming the run
   (`undo RUN_ID`), and `--last` moves on to the run before it.
-- Folders created by apply are never removed. Each undo records a `run` row (command `undo`,
-  args = the undone run's id).
+- A folder that apply created for a move of this run (`rename_op.created_dir`, schema v4: the
+  plan's `extras/`) is removed again once the undo leaves it empty, together with the empty
+  folders between it and the moved file; `os.rmdir` only, so a folder holding anything (a file
+  the user put there, a later run's move) stays. No other folder is ever removed. Each undo
+  records a `run` row (command `undo`, args = the undone run's id).
 """
 
 from __future__ import annotations
@@ -72,6 +75,7 @@ def undo_run(
     exists: Callable[[Path], bool] = os.path.exists,
     rename: Callable[[Path, Path], None] = rename_noreplace,
     fingerprint_of: Callable[[Path], str] = _fingerprint,
+    rmdir: Callable[[Path], None] = os.rmdir,
 ) -> UndoResult:
     """`recover` first. `run_id` None = `latest_run`. Lists the run's `done` moves (in the
     order they will be reversed), asks `confirm`, then moves files back (`undo_order`). A move
@@ -138,4 +142,32 @@ def undo_run(
         mark(op)
     hist.mark_undone(run_id, frozenset(
         op.fingerprint for op, _ in res.skipped if op.kind != "sidecar"))
+    res.removed_dirs = _remove_created_dirs(ops, rmdir)
     return res
+
+
+def _remove_created_dirs(ops: list[RenameOp], rmdir: Callable[[Path], None]) -> list[Path]:
+    """Folders the run's moves created (`created_dir`) that are empty now: each from the
+    moved file's folder up to and including the created folder, deepest first, stopping at
+    the first that is not empty (or cannot be removed)."""
+    removed: list[Path] = []
+    chains: set[tuple[Path, ...]] = set()
+    for op in ops:
+        if not op.created_dir:
+            continue
+        top = Path(op.created_dir)
+        d = Path(op.new_path).parent
+        chain = [d, *(p for p in d.parents if top in p.parents or p == top)]
+        if top not in chain:
+            continue  # not above the file: a row we do not understand, leave it
+        chains.add(tuple(chain[: chain.index(top) + 1]))
+    for chain in sorted(chains, key=lambda c: -len(c[0].parts)):
+        for d in chain:
+            if d in removed:
+                continue
+            try:
+                rmdir(d)
+            except OSError:
+                break  # not empty (or gone, or not ours to remove): stop here
+            removed.append(d)
+    return removed

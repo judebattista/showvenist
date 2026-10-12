@@ -89,6 +89,8 @@ class RenameOp:
     season: int | None = None
     episode: int | None = None
     episode_end: int | None = None
+    # schema v4: the outermost folder this move created for its target (None: it existed)
+    created_dir: str | None = None
 
 
 class StateDbMissing(Exception):

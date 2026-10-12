@@ -109,6 +109,9 @@ class SeasonNode:
     folder: Path | None
     discs: list[DiscNode] = field(default_factory=list)
     loose: list[FileNode] = field(default_factory=list)  # files with no disc identity
+    # files inside an extras folder (`extras/`, Jellyfin's `featurettes/`, ...): known extras,
+    # never solved or moved (hierarchy.parse.is_extras_folder); not in ShowNode.all_files
+    extras: list[FileNode] = field(default_factory=list)
 
 
 @dataclass
@@ -132,6 +135,7 @@ class ShowNode:
     problems: list[str] = field(default_factory=list)  # levels that could not be parsed
     disagreements: list[str] = field(default_factory=list)  # folder vs title tag
     ignored: list[Path] = field(default_factory=list)  # folders skipped via .showvenist-ignore
+    extras: list[FileNode] = field(default_factory=list)  # in show-level extras folders
 
     def all_files(self) -> list[FileNode]:
         out: list[FileNode] = []

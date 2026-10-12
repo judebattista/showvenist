@@ -257,13 +257,17 @@ def test_skipped_files_and_their_reasons(tmp_path):
         history=h, opts=PlanOptions(exclude={f["excl"]}),
     )
     assert plan.ok
+    # a confirmed extra outside extras/ is moved like any extra (sv-dsk), its match linked
     assert {m.old.name: m.new.name for m in plan.moves} == {
-        "pinned.mkv": "synth_show_s01e03.mkv", "oospin.mkv": "synth_show_s01e05.mkv"}
-    assert all(m.pinned for m in plan.moves)
+        "pinned.mkv": "synth_show_s01e03.mkv", "oospin.mkv": "synth_show_s01e05.mkv",
+        "cx.mkv": "Disc 1__cx.mkv"}
+    assert all(m.pinned for m in plan.moves if m.kind == "episode")
+    cx = next(m for m in plan.moves if m.old.name == "cx.mkv")
+    assert cx.kind == "extra" and cx.confirmed and "[confirmed]" in cx.reason
     assert {k.path.name: k.reason for k in plan.skipped} == {
         "named.mkv": "named", "notready.mkv": "not_ready", "unread.mkv": "unreadable",
         "medium.mkv": "below_high", "oos.mkv": "out_of_scope", "excl.mkv": "excluded",
-        "cx.mkv": "confirmed_extra", "playall.mkv": "below_high", "x.mkv": "ignored"}
+        "playall.mkv": "below_high", "x.mkv": "ignored"}
 
 
 def test_season_change_needs_a_pin_and_an_existing_folder(tmp_path):

@@ -231,6 +231,19 @@ def suggest_disc_order(discs: list[DiscNode]) -> list[DiscNode]:
 
 IGNORE_FILE = ".showvenist-ignore"
 
+# Folders that hold extras, never a disc or a season: the `extras` folder the rename plan
+# creates (§13.2) and Jellyfin's other extras folder names. Matched case-insensitively.
+EXTRAS_FOLDER_NAMES = frozenset({
+    "extras", "featurettes", "behind the scenes", "deleted scenes", "interviews", "scenes",
+    "shorts", "trailers", "other",
+})
+
+
+def is_extras_folder(name: str) -> bool:
+    """A folder of extras (EXTRAS_FOLDER_NAMES): its files are known extras, left in place,
+    never solved or moved again, and the folder is never a parse problem."""
+    return name.strip().casefold() in EXTRAS_FOLDER_NAMES
+
 
 def is_ignored(folder: Path) -> bool:
     """A folder holding a `.showvenist-ignore` file is out of scope: never analyzed, matched,
@@ -383,6 +396,9 @@ class _Builder:
     def season_node(self, folder: Path, number: int | None) -> SeasonNode:
         node = SeasonNode(number, folder)
         for sub in self.subdirs(folder):
+            if is_extras_folder(sub.name):
+                node.extras += self.all_files_under(sub)
+                continue
             ref = self.disc(sub.name)
             if ref is None:
                 self.problems.append(f"cannot parse disc folder {sub.name!r} in {folder.name!r}")
@@ -422,6 +438,10 @@ def build_tree(
         show.name = root.name
         show.ignored = [root]
         return show
+    if root.is_dir() and is_extras_folder(root.name):  # an extras folder: nothing to solve
+        show.name = root.name
+        show.extras = b.all_files_under(root)
+        return show
     seasons: list[SeasonNode] = []
     root_disc = b.disc(root.name)
     root_season = b.season(root.name)
@@ -437,6 +457,9 @@ def build_tree(
     else:
         show.name = root.name
         for sub in b.subdirs(root):
+            if is_extras_folder(sub.name):  # show-level extras: no season, nothing to solve
+                show.extras += b.all_files_under(sub)
+                continue
             ref = b.disc(sub.name)
             n = b.season(sub.name) if ref is None else None
             if n is not None:

@@ -229,7 +229,7 @@ def render_tables(report: Report) -> str:
                 r.path.rsplit("/", 1)[-1],
                 _label(r.decision),
                 f"{r.confidence.odds} ({r.confidence.level})",
-                _top_signals(r),
+                "already in extras/" if "in_extras" in r.flags else _top_signals(r),
                 ", ".join(r.flags),
             )
         console.print(table)

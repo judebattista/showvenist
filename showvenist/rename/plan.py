@@ -31,7 +31,7 @@ from pathlib import Path
 
 from showvenist.bundle.schema import Bundle
 from showvenist.hierarchy.marker import _find_ordering
-from showvenist.hierarchy.parse import parse_season
+from showvenist.hierarchy.parse import is_extras_folder, parse_season
 from showvenist.rename import naming
 from showvenist.rename.sidecars import find_sidecars
 from showvenist.rename.types import Plan, PlannedMove, PlanOptions, SkippedFile
@@ -153,8 +153,10 @@ def build_plan(
       (`EpisodeRef.episode_end_id`, decision 64) is named with the range (`s01e11-e12`,
       `naming.range_template`); it is skipped (`cannot_name`) when its two episodes are not
       consecutive in the naming order or the template has no `{e}`.
-    - Extras: `<Season>/extras/` with `naming.extra_name(disc folder, original)`; a confirmed
-      extra in `history` is skipped.
+    - Extras: `<Season>/extras/` with `naming.extra_name(disc folder, original)`. A confirmed
+      extra (flag `confirmed`, or confirmed in `history`) is planned like any other extra
+      (`assign --extra` without `--rename` moves nothing); an extra already inside an extras
+      folder (flag `in_extras`, §5.1) is left there (`already_in_place`).
     - Duplicates (`FileReport.duplicate_of`): stay in their own folder, renamed in place with
       `naming.dupe_stem`, index from `max(history.highest_dupe_index, parse_dupe over the
       folder) + 1` upward in `duplicate_rank` order.
@@ -203,13 +205,15 @@ def build_plan(
         if "duplicate" in flags or "near_duplicate" in flags:
             skip(old, "duplicate_primary_missing", "a duplicate whose primary is not known")
             continue
+        if "in_extras" in flags or (fr.decision.kind == "extra"
+                                    and is_extras_folder(old.parent.name)):
+            skip(old, "already_in_place", f"already in {old.parent.name}/")
+            continue
         pinned = "pinned" in flags
         confirmed = "confirmed" in flags
-        if fr.decision.kind == "extra":
-            if confirmed or (history is not None and fr.fingerprint
-                             and history.is_confirmed_extra(fr.fingerprint)):
-                skip(old, "confirmed_extra", "already a confirmed extra")
-                continue
+        if fr.decision.kind == "extra" and not confirmed and history is not None \
+                and fr.fingerprint and history.is_confirmed_extra(fr.fingerprint):
+            confirmed = True  # decided earlier: moved like any extra, its match linked
         if "out_of_scope" in flags and not pinned:
             skip(old, "out_of_scope", "evidence points to another season: pin it to move it")
             continue
@@ -304,6 +308,8 @@ def build_plan(
         else:
             target = season_dir / EXTRAS_DIR / naming.extra_name(disc_dir, v.old.name)
             v.reason = f"extra, {v.fr.confidence.level} {v.fr.confidence.odds}{_flags_text(v.fr)}"
+            if v.confirmed and "confirmed" not in v.fr.flags:
+                v.reason += " [confirmed]"
         if target == v.old:
             skip(v.old, "already_in_place")
             placed[v.old] = None

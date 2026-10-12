@@ -104,7 +104,14 @@ ALTER TABLE match ADD COLUMN episode_end INTEGER;
 ALTER TABLE rename_op ADD COLUMN episode_end INTEGER;
 """
 
-MIGRATIONS: tuple[str, ...] = (_V1, _V2, _V3)
+# v4: `created_dir` is the outermost folder a move had to create for its target (the plan's
+# `extras/`), NULL when the target folder existed (every row written before v4). Undo removes
+# such a folder again when it is empty afterwards (§13.5), and no other folder.
+_V4 = """
+ALTER TABLE rename_op ADD COLUMN created_dir TEXT;
+"""
+
+MIGRATIONS: tuple[str, ...] = (_V1, _V2, _V3, _V4)
 SCHEMA_VERSION = len(MIGRATIONS)
 
 

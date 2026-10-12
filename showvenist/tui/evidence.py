@@ -29,6 +29,7 @@ FLAG_TEXT = {
     "disc_window_failed": "the LLM found no fit in the disc window",
     "confirmed": "confirmed in history",
     "named": "already named as an episode",
+    "in_extras": "already in extras/",
     "not_ready": "still being written",
     "unreadable": "unreadable",
     "near_duplicate": "near duplicate (same dialogue, different bytes)",

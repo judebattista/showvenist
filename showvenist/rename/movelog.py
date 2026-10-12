@@ -354,8 +354,9 @@ def apply_plan(
             cur = c.execute(
                 "insert into rename_op (run_id, fingerprint, kind, old_path, new_path, status,"
                 " show_slug, episode_id, dupe_index, season, episode, title, match_source,"
-                " confidence, bundle_revision, disc_label, prior_match, cross_fs, episode_end)"
-                " values (?,?,?,?,?,'planned',?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " confidence, bundle_revision, disc_label, prior_match, cross_fs, episode_end,"
+                " created_dir)"
+                " values (?,?,?,?,?,'planned',?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (run_id, move.fingerprint, move.kind, str(move.old), str(new), move.show_slug,
                  move.episode_id if move.kind in ("episode", "duplicate") else None,
                  move.dupe_index,
@@ -367,7 +368,8 @@ def apply_plan(
                  move.disc if video else None,
                  int(move.confirmed) if video else None,
                  int(id(move) in cross_ids),
-                 move.episode_end if video else None),
+                 move.episode_end if video else None,
+                 _missing_dir(new.parent)),
             )
             op_id = int(cur.lastrowid)
         mover = move_across if id(move) in cross_ids else rename
@@ -415,6 +417,17 @@ def apply_plan(
         done = move if (new == move.new) else replace(move, new=new, collision_index=n_used)
         result.done.append(done)
     return result
+
+
+def _missing_dir(folder: Path) -> str | None:
+    """The outermost folder of `folder`'s chain that does not exist yet (what `mkdir(parents=
+    True)` will create), or None when `folder` exists."""
+    out = None
+    for d in (folder, *folder.parents):
+        if os.path.isdir(d):
+            break
+        out = d
+    return None if out is None else str(out)
 
 
 def _record(c, hist: History, bundle_revision: str | None, move: PlannedMove, new: Path,

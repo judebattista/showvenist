@@ -70,7 +70,7 @@ def test_upgrade_from_schema_2_keeps_rows_as_single_episodes(tmp_path):
     c.close()
     db = StateDb(path)
     assert db.migrated_from == 2
-    assert db.conn.execute("PRAGMA user_version").fetchone()[0] == migrations.SCHEMA_VERSION == 3
+    assert db.conn.execute("PRAGMA user_version").fetchone()[0] == migrations.SCHEMA_VERSION == 4
     for table in ("match", "rename_op"):
         assert "episode_end" in {r[1] for r in db.conn.execute(f"PRAGMA table_info({table})")}
     (m,) = History(db).confirmed("s")

@@ -150,4 +150,5 @@ def format_undo(res: UndoResult) -> str:
     lines = [rec.rstrip("\n")] if rec else []
     lines += [f"Run {res.run_id}: moved back {len(res.undone)}, skipped {len(res.skipped)}."]
     lines += [f"  skipped {o.new_path}: {why}" for o, why in res.skipped]
+    lines += [f"  removed the empty folder {d} (created by that run)" for d in res.removed_dirs]
     return "\n".join(lines)

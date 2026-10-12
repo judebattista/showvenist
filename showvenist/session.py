@@ -36,6 +36,7 @@ No matching logic lives outside this module and the modules it calls.
 from __future__ import annotations
 
 import math
+import os
 import re
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
@@ -105,7 +106,7 @@ from showvenist.scoring.types import (
     level_of,
 )
 from showvenist.state.db import Match
-from showvenist.state.fingerprint import fingerprint
+from showvenist.state.fingerprint import content_key, fingerprint
 from showvenist.state.history import History, end_episode_id, episode_code
 
 # progress(done, total, path, error): called once per input path after it is handled
@@ -130,6 +131,7 @@ FLAG_POSSIBLE_TWO_PARTER = "possible_two_parter"  # long as two episodes, both f
 FLAG_UNREADABLE = "unreadable"  # could not be read or analyzed: needs review (§4.5)
 FLAG_CONFIRMED = "confirmed"  # decided earlier and read straight from history (§4.3)
 FLAG_HISTORY_DUPLICATE = "history_duplicate"  # its episode is confirmed for another file (§11.4)
+FLAG_IN_EXTRAS = "in_extras"  # already inside an extras folder (§5.1): a known extra, left there
 
 
 def ordering_key(bundle: Bundle, name: str) -> str | None:
@@ -306,6 +308,9 @@ class Session:
         self.history = history
         self.reanalyze = reanalyze  # ignore confirmed files in history (the prior stays)
         self.confirmed_extras: dict[Path, FileInfo] = {}  # confirmed extras: not analyzed
+        # files already inside an extras folder (§5.1): known extras, never analyzed or moved
+        self.in_extras: dict[Path, FileInfo] = {}
+        self._extras_paths: set[Path] = set()
         self.allow_duplicates = allow_duplicates  # near duplicates are other versions (§4.3)
         self.bundle_dir = Path(bundle_dir) if bundle_dir is not None else None
         self.config = config
@@ -372,6 +377,9 @@ class Session:
                     self._node[Path(f.path)] = (d, f)
             for f in self.season_node.loose:
                 self._node[Path(f.path)] = (None, f)
+            for f in self.season_node.extras:
+                self._node[Path(f.path)] = (None, f)
+                self._extras_paths.add(Path(f.path))
         self.pins: dict[Path, str | None] = {}  # row path -> episode id (None = extra)
         self.solution: Solution | None = None
         self._evid: dict[str, _Evidence] = {}
@@ -486,7 +494,9 @@ class Session:
         for path in paths:
             node = self._node.get(path)
             fn = node[1] if node is not None else None
-            if fn is not None and not fn.ready:
+            if path in self._extras_paths:
+                self._add_in_extras(path)
+            elif fn is not None and not fn.ready:
                 self.not_ready[path] = FileInfo(
                     path=path, fingerprint="", duration_s=0.0, disc=self._disc_name(path)
                 )
@@ -501,10 +511,13 @@ class Session:
             if progress is not None:
                 progress(done, total, path, None)
         if named_nodes:
+            # a `_dupe_N` copy (decision 56) never holds its episode over the file it copies
+            named_nodes.sort(key=lambda fn: fn.named.dupe is not None)
             self._add_named(named_nodes)
         for path in self._add_confirmed(hist_hits):  # not usable as a pin: analyze it
             todo.append(path)
             done -= 1
+        self._key_named_rows()
 
         offset = done
 
@@ -633,6 +646,42 @@ class Session:
                 held |= n.held
                 self.named[path] = n
 
+    def _add_in_extras(self, path: Path) -> None:
+        """A file already inside an extras folder: reported as an extra (`in_extras`), never
+        analyzed, solved or moved. One that history confirms as an episode (moved there by
+        hand) stays an extra here, with a notice; it holds nothing in the solve."""
+        try:
+            fp = fingerprint(path)
+        except OSError:
+            fp = ""
+        self.in_extras[path] = FileInfo(path=path, fingerprint=fp, duration_s=0.0)
+        if self.history is None or not fp:
+            return
+        eps = [m for m in self.history.confirmed_for_file(fp)
+               if m.show_slug == self.show_slug and m.episode_id is not None]
+        if eps:
+            m = eps[-1]
+            code = episode_code(m.season, m.episode, m.episode_end) if m.season is not None \
+                else m.episode_id
+            self.notices.append(
+                f"{path.name}: in {path.parent.name}/ but confirmed in history as {code}; "
+                "left there as an extra (move it out of the extras folder to solve it)")
+
+    def _key_named_rows(self) -> None:
+        """Content keys (§7.1) of the named and confirmed rows, which are never analyzed, so an
+        exact copy of one is found as its duplicate (decision 56: renamed `_dupe_N` beside the
+        primary's episode name, never solved on its own and sent to extras because its episode
+        is held)."""
+        have = set(self._keys.values())
+        for n in self.named_rows:
+            p = n.info.path
+            if p in have:
+                continue
+            try:
+                self._keys.setdefault(content_key(p), p)
+            except OSError:
+                continue
+
     def _confirmed_end(self, fp: str, eid: str | None) -> str | None:
         """A named file (§5.5) whose fingerprint history confirms as a two-episode file starting
         at `eid` (decision 64): the second episode's id. The name alone (`s01e11-e12`) is read
@@ -674,6 +723,15 @@ class Session:
         in_scope = {c.id for c in self.candidates}
         held = {e for n in self.named.values() if n.row for e in n.held}
         back: list[Path] = []
+
+        def last_seen_here(hit) -> bool:
+            """Byte-identical copies share a fingerprint, so each is a hit: the one at the
+            path history last saw for it is the confirmed row, the others its duplicates."""
+            mf = self.history.get_file(hit[1]) if self.history else None
+            return (mf is not None and bool(mf.last_path)
+                    and os.path.abspath(mf.last_path) == os.path.abspath(hit[0]))
+
+        hits = sorted(hits, key=lambda h: not last_seen_here(h))  # stable: path order otherwise
         for path, fp, eid, end in hits:
             info = FileInfo(path=path, fingerprint=fp, duration_s=0.0,
                             disc=self._disc_name(path))
@@ -1427,7 +1485,8 @@ class Session:
         for dup, primary in self.duplicates.items():
             i = self._index(primary)
             flags[len(files)] = [
-                *self._dup_flags(dup), *(fl for fl in flags[i] if fl != FLAG_PINNED)
+                *self._dup_flags(dup),
+                *(fl for fl in flags[i] if fl not in (FLAG_PINNED, FLAG_CONFIRMED, FLAG_NAMED))
             ]
             if dup in self.near:
                 own.add(len(files))
@@ -1561,6 +1620,10 @@ class Session:
         extra_rows += [
             self._plain_row(info, "extra", None, [FLAG_CONFIRMED], high=True)
             for info in self.confirmed_extras.values()
+        ]
+        extra_rows += [
+            self._plain_row(info, "extra", None, [FLAG_IN_EXTRAS], high=True)
+            for info in self.in_extras.values()
         ]
         dup = self._duplicate_ranks()
         explicit = {p for p, (_, n) in self._node.items() if n.explicit}
@@ -1700,6 +1763,7 @@ __all__ = [
     "FLAG_DUPLICATE",
     "FLAG_DUPLICATE_ALLOWED",
     "FLAG_HISTORY_DUPLICATE",
+    "FLAG_IN_EXTRAS",
     "FLAG_NAMED",
     "FLAG_NEAR_DUPLICATE",
     "FLAG_NOT_READY",

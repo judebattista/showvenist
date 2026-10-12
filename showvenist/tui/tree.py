@@ -76,8 +76,9 @@ def row_for(fr: FileReport, pre_pin_level: dict[Path, str], primary_pinned: set[
     delta = math.inf if fr.confidence.delta is None else fr.confidence.delta
     odds = "" if level == "high" else f"  {fr.confidence.odds}"
     text = f"{_short(path)}  {_ep_label(fr, season)}{odds}"
-    if "named" in flags or "confirmed" in flags:
-        why = "already named as an episode" if "named" in flags else "confirmed in history"
+    if "named" in flags or "confirmed" in flags or "in_extras" in flags:
+        why = ("already named as an episode" if "named" in flags
+               else "already in extras/" if "in_extras" in flags else "confirmed in history")
         return Row(path, fr.disc, GLYPH_HIGH, INERT_STYLE, f"{text}  ({why})", visible=False,
                    report=fr, inert_reason=f"{path.name} is {why}: nothing to do here")
     if "not_ready" in flags or "unreadable" in flags:

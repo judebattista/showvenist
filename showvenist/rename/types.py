@@ -16,8 +16,7 @@ SkipReason = Literal[
     "below_high",       # medium or low and not pinned: needs review
     "out_of_scope",     # evidence points to another season (§11.3) and not pinned
     "extras_disabled",  # identified extra but move_extras is off
-    "already_in_place", # the target is the file's own path
-    "confirmed_extra",  # already a confirmed extra in history (re-runs skip it)
+    "already_in_place", # the target is the file's own path, or an extra already in extras/
     "duplicate_primary_missing",
     "duplicate_of_extra",  # a copy of an extra: left as it is (decision 56 names episodes only)
     "excluded",         # unticked on the plan screen (PlanOptions.exclude)
@@ -125,3 +124,4 @@ class UndoResult:
     skipped: list[tuple[RenameOp, str]] = field(default_factory=list)  # file gone / old path taken
     cancelled: bool = False
     recovered: RecoveryReport | None = None  # leftovers reconciled before the undo
+    removed_dirs: list[Path] = field(default_factory=list)  # empty folders apply had created
