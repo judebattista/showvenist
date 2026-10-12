@@ -6,13 +6,13 @@ operating notes. Read `CLAUDE.md`, then this, then `bd ready`.
 
 ## 1. Where the code is
 
-- Branch **`m4-hierarchy`** (head `d6523d0`). Earlier branches are linear ancestors: `m0-spike` → `m1-bundle` →
+- Branch **`m4-hierarchy`** (head: see `git log`). Earlier branches are linear ancestors: `m0-spike` → `m1-bundle` →
   `m3-scoring` → `m4-hierarchy`. **Nothing has been pushed; the user pushes.** Subagents never commit.
-- 914 tests pass; `ruff check .` clean. Python is **`.venv/bin/python`**, `.venv/bin/showvenist`, `.venv/bin/ruff`
+- 953 tests pass; `ruff check .` clean. Python is **`.venv/bin/python`**, `.venv/bin/showvenist`, `.venv/bin/ruff`
   (`uv` is no longer on the PATH; do not install anything).
-- Milestones: **M0–M5 done** and reviewed (one Opus conformance review each, findings fixed; the M5 review's
-  fixes are `d6523d0`). **M6 (review TUI, `sv-zrm`) is next**, then M7 (more adapters, `sv-opu`). M5 epic `sv-o4f`
-  is closed.
+- Milestones: **M0–M6 done** and reviewed (one Opus conformance review each, findings fixed; the user ran the
+  TUI over SSH on a synthetic season: `scripts/demo_season.py DIR` builds one, and `DIR/run.sh` runs showvenist
+  with state kept in DIR). **M7 (more adapters, `sv-opu`) is next.** Decisions 56–61 cover M5 and M6.
 - Beads data is local (Dolt DB is gitignored); backup lives in `data/beads-backup/` (`bd backup sync`).
 
 ## 2. What exists (package `showvenist/`)
@@ -153,19 +153,15 @@ SHOWVENIST_LLM_SCOPE=season .venv/bin/showvenist eval data/manifest-named.csv -o
 
 ## 8. Next steps (in this order; the user decides)
 
-1. **M6 review TUI** (`sv-zrm`): a design talk first. Items waiting for it: an explicit file argument inside a disc
-   folder is flattened (the report cannot tell file from directory arguments); a pin that overrides the top choice
-   should record `rejected` (`History.reject` exists, nothing calls it); `report.render_tables` may mishandle
-   bracketed file names.
-2. M5 known gaps: a newer run's move links to the older run's match row (undoing the original marks that decision
-   undone though a later run moved the file again; a `superseded` status would fix it); no CLI test applies two
-   seasons in one invocation; byte-identical copies share a fingerprint. A first real `--apply` is done on a copy of
-   a season, never on `/mnt/storage/tv` during development.
+1. **M7 adapters** (`sv-opu`: TVmaze, Wikipedia, multi-source merge, `bundle edit --refresh`, OCR n-gram survival
+   eval). OpenSubtitles stays parked (decision 43). Design talk first.
+2. Known gaps: a newer run's move links to the older run's match row (a `superseded` status would fix it); no CLI
+   test applies two seasons in one invocation; byte-identical copies share a fingerprint; `report.render_tables`
+   may mishandle bracketed file names. First real `--apply` is done on a copy of a season, never on `/mnt/storage/tv`
+   during development. TUI: `L` (full season as candidates) is deferred.
 3. Open small items: `sv-60p.13` (cues gate: needs paid cue generation), `sv-60p.15` (near-duplicate top-1
-   rule), `sv-31q` (duration σ with no season).
-4. Deferred: sparse-subtitle read cost (`sv-o2p.7`), loose files + disc blocks (`sv-o2p.9`), M7 adapters
-   (`sv-opu`; OpenSubtitles stays parked).
-5. Optional: a paid eval with the LLM over the labeled raw rips (estimate first, ask for the budget); fill the 35
+   rule), `sv-31q` (duration σ with no season), `sv-o2p.7` (performance), `sv-o2p.9` (loose files with discs).
+4. Optional: a paid eval with the LLM over the labeled raw rips (estimate first, ask for the budget); fill the 35
    skipped Supernatural near-length rows with `episode?`; generalize title cards to other shows (config only);
    make production tie-breaking independent of file order if the user wants it strictly.
 
