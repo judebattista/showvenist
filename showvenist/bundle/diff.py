@@ -214,7 +214,8 @@ def history_impact(old: Bundle, new: Bundle, hist: Any, slug: str) -> list[Impac
         if m.episode_id is None or m.season is None or m.episode is None:
             continue  # extras
         path = _path(hist, m.fingerprint)
-        recorded = label(m.season, m.episode)
+        recorded = label(m.season, m.episode) + (
+            f"-E{m.episode_end:02d}" if getattr(m, "episode_end", None) else "")
         if m.episode_id not in new_ids:
             rows.append(ImpactRow(path, m.episode_id, recorded, "removed"))
             continue

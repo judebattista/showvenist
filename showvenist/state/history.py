@@ -9,12 +9,13 @@ from __future__ import annotations
 from collections.abc import Iterable
 from datetime import UTC, datetime
 
+from showvenist.bundle.schema import Bundle
 from showvenist.state.db import Match, MatchSource, MediaFile, Run, StateDb
 from showvenist.state.migrations import MATCH_STATUSES  # noqa: F401  (documented vocabulary)
 
 _MATCH_COLS = (
     "id, fingerprint, show_slug, episode_id, season, episode, title, status, source,"
-    " confidence, margin, bundle_revision, run_id, created_at"
+    " confidence, margin, bundle_revision, run_id, created_at, episode_end"
 )
 
 
@@ -28,6 +29,57 @@ def _match(r) -> Match:
 
 def _file(r) -> MediaFile:
     return MediaFile(**{k: r[k] for k in r.keys()})
+
+
+def episode_code(season: int | None, episode: int | None, episode_end: int | None = None) -> str:
+    """'S01E11', or 'S01E11-E12' for a two-episode file (decision 64); 'extra' without a
+    number."""
+    if season is None or episode is None:
+        return "extra"
+    return f"S{season:02d}E{episode:02d}" + (f"-E{episode_end:02d}" if episode_end else "")
+
+
+def end_episode_id(bundle: Bundle, episode_id: str | None, season: int | None,
+                   episode: int | None, episode_end: int | None,
+                   prefer: str | None = None) -> str | None:
+    """The second episode of a two-episode match (decision 64): the entry numbered
+    (season, episode_end) in an ordering that lists `episode_id` at (season, episode), the
+    ordering `prefer` first, then the bundle's orderings in order. The match does not store
+    which ordering it was numbered in; its own numbers identify it. None for a one-episode match
+    or when no ordering fits."""
+    if episode_end is None or episode_id is None or season is None or episode is None:
+        return None
+    keys = list(bundle.orderings)
+    if prefer in bundle.orderings:
+        keys.remove(prefer)
+        keys.insert(0, prefer)
+    for k in keys:
+        ents = bundle.orderings[k].entries
+        if not any(e.episode_id == episode_id and e.season == season and e.episode == episode
+                   for e in ents):
+            continue
+        hits = {e.episode_id for e in ents if e.season == season and e.episode == episode_end}
+        if len(hits) == 1:
+            return next(iter(hits))
+    return None
+
+
+def held_episode_ids(bundle: Bundle | None, m: Match, prefer: str | None = None) -> list[str]:
+    """Every episode a confirmed match holds: its episode, and for a two-episode file the
+    second one too (decision 64; needs the bundle to find it). [] for an extra."""
+    if m.episode_id is None:
+        return []
+    out = [m.episode_id]
+    if bundle is not None and m.episode_end is not None:
+        end = end_episode_id(bundle, m.episode_id, m.season, m.episode, m.episode_end, prefer)
+        if end is not None and end != m.episode_id:
+            out.append(end)
+    return out
+
+
+def _check_end(episode: int | None, episode_end: int | None) -> None:
+    if episode_end is not None and (episode is None or episode_end <= episode):
+        raise ValueError("episode_end must follow the first episode of a two-episode file")
 
 
 class History:
@@ -91,16 +143,17 @@ class History:
     # --- decisions ------------------------------------------------------------------------
     def _insert(
         self, c, fingerprint, show_slug, *, episode_id, season, episode, title, status, source,
-        run_id, confidence=None, margin=None, bundle_revision=None,
+        run_id, confidence=None, margin=None, bundle_revision=None, episode_end=None,
     ) -> Match:
         if episode_id is None and (season is not None or episode is not None):
             raise ValueError("an extra carries no season or episode")
+        _check_end(episode, episode_end)
         cur = c.execute(
             "insert into match (fingerprint, show_slug, episode_id, season, episode, title,"
-            " status, source, confidence, margin, bundle_revision, run_id, created_at)"
-            " values (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " status, source, confidence, margin, bundle_revision, run_id, created_at,"
+            " episode_end) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (fingerprint, show_slug, episode_id, season, episode, title, status, source,
-             confidence, margin, bundle_revision, run_id, _now()),
+             confidence, margin, bundle_revision, run_id, _now(), episode_end),
         )
         row = c.execute(
             f"select {_MATCH_COLS} from match where id=?", (cur.lastrowid,)
@@ -111,31 +164,35 @@ class History:
         self, fingerprint: str, show_slug: str, *, episode_id: str | None, season: int | None,
         episode: int | None, title: str | None, source: MatchSource, run_id: int | None,
         confidence: str | None = None, margin: float | None = None,
-        bundle_revision: str | None = None,
+        bundle_revision: str | None = None, episode_end: int | None = None,
     ) -> Match:
         """Record a confirmed match (episode_id None = confirmed extra). Any other confirmed
         match of the same file and show becomes `rejected` (assign over a confirmed match,
-        §4.4); re-confirming the same target just replaces the earlier row."""
+        §4.4); re-confirming the same target just replaces the earlier row. `episode_end`: the
+        last episode's number of a two-episode file (decision 64), numbered like `episode`;
+        a different `episode_end` is a different target."""
         with self.db.transaction() as c:
             return self.confirm_in(
                 c, fingerprint, show_slug, episode_id=episode_id, season=season,
                 episode=episode, title=title, source=source, run_id=run_id,
-                confidence=confidence, margin=margin, bundle_revision=bundle_revision)
+                confidence=confidence, margin=margin, bundle_revision=bundle_revision,
+                episode_end=episode_end)
 
     def confirm_in(
         self, c, fingerprint: str, show_slug: str, *, episode_id: str | None,
         season: int | None, episode: int | None, title: str | None, source: MatchSource,
         run_id: int | None, confidence: str | None = None, margin: float | None = None,
-        bundle_revision: str | None = None,
+        bundle_revision: str | None = None, episode_end: int | None = None,
     ) -> Match:
         """`confirm` inside the caller's open transaction `c` (§13.4: one transaction per
         move)."""
         if episode_id is None and (season is not None or episode is not None):
             raise ValueError("an extra carries no season or episode")
+        _check_end(episode, episode_end)
         same = c.execute(
             "select id, run_id, source from match where fingerprint=? and show_slug=? and"
-            " status='confirmed' and episode_id is ?",
-            (fingerprint, show_slug, episode_id),
+            " status='confirmed' and episode_id is ? and episode_end is ?",
+            (fingerprint, show_slug, episode_id, episode_end),
         ).fetchone()
         if same:  # re-confirming the same target rejects nothing
             sid, old_run, old_source = same
@@ -166,6 +223,7 @@ class History:
             c, fingerprint, show_slug, episode_id=episode_id, season=season,
             episode=episode, title=title, status="confirmed", source=source, run_id=run_id,
             confidence=confidence, margin=margin, bundle_revision=bundle_revision,
+            episode_end=episode_end,
         )
 
     def reject(
@@ -249,25 +307,34 @@ class History:
         return bool(self._select(
             "fingerprint=? and status='confirmed' and episode_id is null", (fingerprint,)))
 
-    def confirmed_for_episode(self, show_slug: str, episode_id: str) -> list[Match]:
-        """Files already confirmed for an episode (duplicate warnings, the prior)."""
-        return self._select(
+    def confirmed_for_episode(self, show_slug: str, episode_id: str,
+                              bundle: Bundle | None = None) -> list[Match]:
+        """Files already confirmed for an episode (duplicate warnings, the prior). With the
+        bundle, a two-episode file holding the episode as its second one counts too
+        (decision 64)."""
+        out = self._select(
             "show_slug=? and episode_id=? and status='confirmed'", (show_slug, episode_id))
+        if bundle is None:
+            return out
+        ranges = self._select(
+            "show_slug=? and status='confirmed' and episode_end is not null and episode_id<>?",
+            (show_slug, episode_id))
+        out += [m for m in ranges if episode_id in held_episode_ids(bundle, m)[1:]]
+        return sorted(out, key=lambda m: m.id)
 
     def history_penalty(
         self, show_slug: str, fingerprints: Iterable[str], episode_ids: list[str],
-        penalty: float,
+        penalty: float, bundle: Bundle | None = None,
     ) -> list[list[float]]:
         """(files x episodes) penalty matrix for fusion (§11.4): `penalty` where the episode is
-        confirmed for a DIFFERENT fingerprint, 0 elsewhere. Soft, never an exclusion."""
+        confirmed for a DIFFERENT fingerprint, 0 elsewhere. Soft, never an exclusion. With the
+        bundle, both episodes of a two-episode file are held by it (decision 64)."""
         fps = list(fingerprints)
         holders: dict[str, set[str]] = {}
-        with self.db.transaction() as c:
-            for r in c.execute(
-                "select episode_id, fingerprint from match where show_slug=? and"
-                " status='confirmed' and episode_id is not null", (show_slug,)
-            ):
-                holders.setdefault(r[0], set()).add(r[1])
+        for m in self._select(
+                "show_slug=? and status='confirmed' and episode_id is not null", (show_slug,)):
+            for eid in held_episode_ids(bundle, m):
+                holders.setdefault(eid, set()).add(m.fingerprint)
         return [
             [penalty if (holders.get(e, set()) - {fp}) else 0.0 for e in episode_ids]
             for fp in fps
@@ -276,7 +343,8 @@ class History:
     def confirmed_moves(self, show_slug: str) -> list[tuple[str, int, int]]:
         """(old_path, season, episode) of every applied, not undone video move whose match is
         still a confirmed episode of the show, in journal order (title-order evidence, §11.5).
-        Sidecars, extras, planned and undone moves are left out."""
+        Sidecars, extras, planned and undone moves are left out. A two-episode file counts at
+        its first episode (it is one title on the disc)."""
         with self.db.transaction() as c:
             rows = c.execute(
                 "select r.old_path, m.season, m.episode from rename_op r"

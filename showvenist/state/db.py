@@ -64,6 +64,9 @@ class Match:
     bundle_revision: str | None
     run_id: int | None
     created_at: str
+    # decision 64: the last episode's number of a two-episode file, numbered like `episode`;
+    # None = one episode
+    episode_end: int | None = None
 
 
 @dataclass(frozen=True)
@@ -81,6 +84,11 @@ class RenameOp:
     dupe_index: int | None
     applied_at: str | None
     undone_at: str | None
+    # what the move decided, as numbered in the naming order (schema v2; None before it and
+    # for sidecars); `episode_end` (schema v3) is the last episode of a two-episode file
+    season: int | None = None
+    episode: int | None = None
+    episode_end: int | None = None
 
 
 class StateDbMissing(Exception):

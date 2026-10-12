@@ -1251,7 +1251,9 @@ def _state_file(file: Path) -> tuple[str, int]:
 @app.command()
 def assign(
     file: Path = typer.Argument(..., exists=True, dir_okay=False, help="Media file"),
-    episode: str | None = typer.Argument(None, help="Episode, e.g. S02E05"),
+    episode: str | None = typer.Argument(
+        None, help="Episode, e.g. S02E05; a file holding two episodes: S02E05+S02E06 (or "
+        "S02E05+E06)"),
     show: str | None = typer.Option(
         None, "--show", help="Bundle slug or show title (default: the show folder's marker file)"),
     order: str | None = typer.Option(
@@ -1267,11 +1269,9 @@ def assign(
     """Record a confirmed match by hand (source manual). Moves or renames the file only with
     --rename."""
     from showvenist.config import bundles_dir
-    from showvenist.eval.harness import resolve_labels
-    from showvenist.eval.types import ManifestRow
     from showvenist.hierarchy.marker import ShowResolutionError, read_marker, resolve_show
     from showvenist.state.db import StateDb
-    from showvenist.state.history import History
+    from showvenist.state.history import History, episode_code
 
     if extra == (episode is not None):
         _fail("assign: give an episode (S02E05) or --extra, not both and not neither")
@@ -1296,37 +1296,39 @@ def assign(
     if okey is None:
         _fail(f"assign: unknown ordering {ordering!r} (the bundle has: "
               f"{', '.join(sorted(bundle.orderings))})")
-    eid = season = number = title = None
+    eid = end_eid = season = number = number_end = title = None
     what = "a confirmed extra"
     if not extra:
-        labels, problems = resolve_labels(
-            [ManifestRow(str(file), slug, episode or "", okey)], {slug: bundle})
-        if problems or not labels or labels[0].kind != "episode":
-            _fail(f"assign: {problems[0].reason if problems else f'cannot read {episode!r}'}")
-        eid = labels[0].episode_id
-        ent = next(e for e in bundle.orderings[okey].entries if e.episode_id == eid)
+        eid, end_eid = _assign_label(episode or "", str(file), slug, bundle, okey)
+        entries = {e.episode_id: e for e in bundle.orderings[okey].entries}
+        ent = entries[eid]
         season, number = ent.season, ent.episode
+        number_end = entries[end_eid].episode if end_eid is not None else None
         title = bundle.episode_by_id()[eid].title
-        what = f"S{season:02d}E{number:02d} {title!r}"
+        what = f"{episode_code(season, number, number_end)} {title!r}"
     fp, size = _state_file(file)
     abs_path = str(file.resolve())
     if rename:
         naming = marker.naming_order if marker is not None else None
-        _assign_rename(Path(abs_path), fp, slug, bundle, eid, naming, yes)
+        _assign_rename(Path(abs_path), fp, slug, bundle, eid, naming, yes, end_eid=end_eid)
         return
     with StateDb.open_default() as db:
         hist = History(db)
         typer.echo(f"{file.name}: {what} in {slug} (ordering {okey}), source manual")
         for m in hist.confirmed_for_file(fp):
-            if m.show_slug == slug and m.episode_id != eid:
-                was = ("extra" if m.episode_id is None
-                       else f"S{m.season:02d}E{m.episode:02d}")
+            if m.show_slug == slug and (m.episode_id, m.episode_end) != (eid, number_end):
+                was = episode_code(m.season, m.episode, m.episode_end)
                 typer.echo(f"  its confirmed match {was} will become rejected")
-        if eid is not None:
-            for m in hist.confirmed_for_episode(slug, eid):
+        noted: set[int] = set()
+        for held in (eid, end_eid):
+            if held is None:
+                continue
+            for m in hist.confirmed_for_episode(slug, held, bundle=bundle):
                 other = hist.get_file(m.fingerprint)
-                if m.fingerprint != fp:
-                    typer.echo(f"  note: already confirmed for "
+                if m.fingerprint != fp and m.id not in noted:
+                    noted.add(m.id)
+                    typer.echo(f"  note: {episode_code(m.season, m.episode, m.episode_end)} "
+                               f"is already confirmed for "
                                f"{other.last_path if other else m.fingerprint}")
         if not yes and not typer.confirm("Record this?", default=False):
             typer.echo("Nothing written.")
@@ -1334,12 +1336,54 @@ def assign(
         hist.touch_file(fp, size=size, path=abs_path, show_slug=slug)
         run = hist.begin_run("assign", f"{abs_path} {'--extra' if extra else episode}")
         hist.confirm(fp, slug, episode_id=eid, season=season, episode=number, title=title,
-                     source="manual", run_id=run.id)
+                     source="manual", run_id=run.id, episode_end=number_end)
     typer.echo(f"Recorded (run {run.id}). Nothing was moved or renamed.")
 
 
+def _assign_label(text: str, path: str, slug: str, bundle, okey: str
+                  ) -> tuple[str, str | None]:
+    """(episode id, second episode id or None) for assign's EPISODE argument in ordering
+    `okey`. `S01E11+S01E12` / `S01E11+E12` is a two-episode file (decision 64): the two must be
+    consecutive episodes of one season, listed one right after the other by the ordering.
+    Anything assign cannot honor exactly as written fails with the reason; nothing is dropped."""
+    from showvenist.eval.harness import resolve_labels
+    from showvenist.eval.types import ManifestRow
+
+    text = text.strip()
+    labels, problems = resolve_labels([ManifestRow(path, slug, text, okey)], {slug: bundle})
+    if problems or not labels:
+        why = problems[0].reason if problems else f"cannot read {text!r}"
+        if "+" not in text and "-" in text:
+            why += " (write a file holding two episodes as S01E11+S01E12)"
+        _fail(f"assign: {why}")
+    lab = labels[0]
+    if lab.kind != "episode":
+        _fail(f"assign: {text!r} is not an episode (use --extra for an extra)")
+    ids = list(lab.episode_ids or (lab.episode_id,))
+    if len(ids) == 1:
+        return ids[0], None
+    if len(ids) > 2:
+        _fail(f"assign: {text!r} names {len(ids)} episodes; a file can hold at most two")
+    entries = bundle.orderings[okey].entries
+    pos = {e.episode_id: k for k, e in enumerate(entries)}
+    a, b = entries[pos[ids[0]]], entries[pos[ids[1]]]
+    code = f"S{a.season:02d}E{a.episode:02d}+S{b.season:02d}E{b.episode:02d}"
+    if a.season != b.season:
+        _fail(f"assign: {code} spans two seasons; a two-episode file holds two consecutive "
+              "episodes of one season")
+    if b.episode <= a.episode:
+        _fail(f"assign: in {code} the second episode does not come after the first; write "
+              "the earlier episode first")
+    if b.episode != a.episode + 1:
+        _fail(f"assign: {code} are not consecutive episodes ({b.episode - a.episode - 1} "
+              f"between them in ordering {okey!r})")
+    if pos[ids[1]] != pos[ids[0]] + 1:
+        _fail(f"assign: ordering {okey!r} does not list {code} one right after the other")
+    return ids[0], ids[1]
+
+
 def _assign_rename(file: Path, fp: str, slug: str, bundle, eid: str | None,
-                   naming_order: str | None, yes: bool) -> None:
+                   naming_order: str | None, yes: bool, end_eid: str | None = None) -> None:
     """assign --rename: a one-file plan (pinned, so the match is recorded with source manual
     by the move itself), shown in full, applied after y/N. When the file needs no move, the
     match is recorded as a plain assign."""
@@ -1366,7 +1410,8 @@ def _assign_rename(file: Path, fp: str, slug: str, bundle, eid: str | None,
         ep = bundle.episode_by_id()[eid]
         ent = next(e for o in bundle.orderings.values() for e in o.entries
                    if e.episode_id == eid)
-        ref = EpisodeRef(episode_id=eid, season=ent.season, episode=ent.episode, title=ep.title)
+        ref = EpisodeRef(episode_id=eid, season=ent.season, episode=ent.episode, title=ep.title,
+                         episode_end_id=end_eid)
     disc = file.parent.name if parse_disc(file.parent.name, cfg.hierarchy.disc_patterns) else None
     row = FileReport(
         path=str(file), fingerprint=fp, disc=disc, duration_s=0.0, regime="base",
@@ -1390,6 +1435,9 @@ def _assign_rename(file: Path, fp: str, slug: str, bundle, eid: str | None,
         typer.echo(format_plan(plan))
         if not plan.ok:
             _fail("assign: not applied, the plan has errors (nothing was written)")
+        unnamed = [s for s in plan.skipped if s.reason == "cannot_name"]
+        if unnamed:
+            _fail(f"assign: {unnamed[0].detail} (nothing was written)")
         if not plan.moves:
             if not yes and not typer.confirm("Nothing to move. Record the match anyway?",
                                              default=False):
@@ -1397,12 +1445,13 @@ def _assign_rename(file: Path, fp: str, slug: str, bundle, eid: str | None,
                 raise typer.Exit(1)
             hist.touch_file(fp, size=file.stat().st_size, path=str(file), show_slug=slug)
             run = hist.begin_run("assign", f"{file} {eid or '--extra'}")
-            ent = (next(e for e in bundle.orderings[plan.naming_order].entries
-                        if e.episode_id == eid) if eid else None)
+            nents = {e.episode_id: e for e in bundle.orderings[plan.naming_order].entries}
+            ent = nents[eid] if eid else None
             hist.confirm(fp, slug, episode_id=eid, season=ent.season if ent else None,
                          episode=ent.episode if ent else None,
                          title=bundle.episode_by_id()[eid].title if eid else None,
-                         source="manual", run_id=run.id)
+                         source="manual", run_id=run.id,
+                         episode_end=nents[end_eid].episode if end_eid else None)
             typer.echo(f"Recorded (run {run.id}). Nothing was moved.")
             return
 
@@ -1486,32 +1535,42 @@ def history_cmd(
 
 
 def _print_history(hist, slug: str, bundle, season: int | None, order: str | None) -> None:
+    from showvenist.state.history import episode_code, held_episode_ids
+
     name = order or "aired"
     okey = _ordering_key(bundle, name)
     if okey is None:
         _fail(f"history: unknown ordering {name!r} for {slug}")
     entries = bundle.orderings[okey].entries
+    num = {e.episode_id: e for e in entries}
     by_ep = bundle.episode_by_id()
-    got: dict[str, list[str]] = {}
+    got: dict[str, list[str]] = {}  # episode id -> lines (a two-episode file under its first)
+    held: set[str] = set()  # every confirmed episode, second episodes of a range included
     extras: list[str] = []
     for m in hist.confirmed(slug):
         f = hist.get_file(m.fingerprint)
         path = f.last_path if f else m.fingerprint
         if m.episode_id is None:
             extras.append(path)
-        else:
-            got.setdefault(m.episode_id, []).append(path)
+            continue
+        ids = held_episode_ids(bundle, m, okey)
+        held.update(ids)
+        e = num.get(m.episode_id)
+        if e is None:
+            continue
+        end = num.get(ids[1]) if len(ids) > 1 else None
+        code = episode_code(e.season, e.episode, end.episode if end is not None else None)
+        got.setdefault(m.episode_id, []).append(f"{code} {by_ep[m.episode_id].title}  {path}")
     typer.echo(f"{slug} (ordering {okey})")
     seasons = sorted({e.season for e in entries if season is None or e.season == season})
     for sn in seasons:
         mine = [e for e in entries if e.season == sn]
-        have = [e for e in mine if e.episode_id in got]
-        miss = [e for e in mine if e.episode_id not in got]
+        have = [e for e in mine if e.episode_id in held]
+        miss = [e for e in mine if e.episode_id not in held]
         typer.echo(f"  Season {sn}: {len(have)} of {len(mine)} confirmed")
-        for e in have:
-            for path in got[e.episode_id]:
-                typer.echo(f"    S{e.season:02d}E{e.episode:02d} {by_ep[e.episode_id].title}"
-                           f"  {path}")
+        for e in mine:
+            for line in got.get(e.episode_id, []):
+                typer.echo(f"    {line}")
         if miss:
             typer.echo("    missing: " + ", ".join(f"E{e.episode:02d}" for e in miss))
     if season is None:
@@ -1531,7 +1590,7 @@ def forget(
 ) -> None:
     """Remove every record of a file from state.db (its matches; the file is not touched)."""
     from showvenist.state.db import StateDb
-    from showvenist.state.history import History
+    from showvenist.state.history import History, episode_code
 
     p = Path(target)
     fp = _state_file(p)[0] if p.is_file() else target
@@ -1543,7 +1602,7 @@ def forget(
             _fail(f"forget: no record of {target}")
         typer.echo(f"{fp}" + (f"  {f.last_path}" if f else ""))
         for m in matches:
-            what = "extra" if m.episode_id is None else f"S{m.season:02d}E{m.episode:02d}"
+            what = episode_code(m.season, m.episode, m.episode_end)
             typer.echo(f"  {m.status} {what} ({m.source}, {m.show_slug})")
         typer.echo(f"Would remove the file record and {len(matches)} match(es); the move log "
                    "keeps its text.")
@@ -1654,8 +1713,15 @@ def eval_cmd(
             _fail("eval: no history (no state.db)")
         except SchemaOutdated as e:
             _fail(f"eval: {e}")
+        def bundle_of(slug: str):
+            try:
+                return load_bundle(slug, root)
+            except Exception:  # noqa: BLE001  (missing bundle: reported with the rows below)
+                return None
+
         with hdb:
-            hl = history_labels(History(hdb), [slug_only] if slug_only else None)
+            hl = history_labels(History(hdb), [slug_only] if slug_only else None,
+                                bundle_of=bundle_of)
         rows = hl.rows
         if not rows:
             _fail("eval: history has no confirmed matches with files on disk"

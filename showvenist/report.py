@@ -195,7 +195,7 @@ def to_json(report: Report) -> str:
 def _label(d: Decision) -> str:
     if d.kind == "extra" or d.episode is None:
         return "extra"
-    return f"S{d.episode.season:02d}E{d.episode.episode:02d} {d.episode.title}"
+    return f"{d.episode.code} {d.episode.title}"
 
 
 def _top_signals(r: FileReport, n: int = 3) -> str:

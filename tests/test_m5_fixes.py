@@ -196,7 +196,7 @@ def test_upgrade_from_schema_1_keeps_rows(tmp_path):
     c.close()
     db = StateDb(path)
     assert db.migrated_from == 1
-    assert db.conn.execute("PRAGMA user_version").fetchone()[0] == migrations.SCHEMA_VERSION == 2
+    assert db.conn.execute("PRAGMA user_version").fetchone()[0] == migrations.SCHEMA_VERSION
     cols = {r[1] for r in db.conn.execute("PRAGMA table_info(rename_op)")}
     assert {"season", "episode", "title", "match_source", "confidence", "bundle_revision",
             "disc_label", "prior_match", "cross_fs"} <= cols

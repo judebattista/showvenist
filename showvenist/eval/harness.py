@@ -74,6 +74,23 @@ def _resolve_id(row: ManifestRow, bundle: Bundle) -> tuple[str | None, str]:
     return eid, ""
 
 
+def _resolve_ids(row: ManifestRow, bundle: Bundle) -> tuple[tuple[str, ...], str]:
+    """`@a+@b`: one file holding the episodes named by id (a two-episode file from history,
+    decision 64)."""
+    ids: list[str] = []
+    for part in (x.strip() for x in row.label.split("+")):
+        if not part.startswith("@"):
+            return (), f"{row.label}: mixes episode ids with other labels"
+        eid, reason = _resolve_id(ManifestRow(row.path, row.show, part, row.order, row.disc),
+                                  bundle)
+        if reason:
+            return (), reason
+        ids.append(eid)  # type: ignore[arg-type]
+    if len(set(ids)) != len(ids):
+        return (), f"{row.label} names the same episode twice"
+    return tuple(ids), ""
+
+
 def _split_multi(label: str) -> list[str] | None:
     """'S01E01+S01E02' or 'S01E01+E02' -> ['S01E01', 'S01E02']; None for a single label."""
     parts = [x.strip() for x in label.split("+")]
@@ -124,6 +141,12 @@ def resolve_labels(
             resolved.append(ResolvedLabel(row, "extra", multi=True))
         elif label == "episode?":
             resolved.append(ResolvedLabel(row, "episode?"))
+        elif row.label.strip().startswith("@") and "+" in row.label:
+            ids, reason = _resolve_ids(row, bundle)
+            if reason:
+                problems.append(Problem(row, reason))
+            else:
+                resolved.append(ResolvedLabel(row, "episode", episode_id=ids[0], episode_ids=ids))
         elif row.label.strip().startswith("@"):
             eid, reason = _resolve_id(row, bundle)
             if reason:

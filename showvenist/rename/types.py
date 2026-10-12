@@ -21,6 +21,7 @@ SkipReason = Literal[
     "duplicate_primary_missing",
     "duplicate_of_extra",  # a copy of an extra: left as it is (decision 56 names episodes only)
     "excluded",         # unticked on the plan screen (PlanOptions.exclude)
+    "cannot_name",      # a two-episode file the naming order or template cannot name (dec. 64)
 ]
 
 
@@ -36,6 +37,7 @@ class PlannedMove:
     episode_id: str | None = None  # None for extras and sidecars of extras
     season: int | None = None  # in the show's naming order (§13.1)
     episode: int | None = None
+    episode_end: int | None = None  # last episode of a two-episode file (decision 64)
     title: str | None = None
     parent: int | None = None  # index into Plan.moves of the video this sidecar follows
     dupe_index: int | None = None  # X of `dupe_X` (kind 'duplicate')

@@ -96,7 +96,15 @@ ALTER TABLE rename_op ADD COLUMN prior_match INTEGER;  -- 1: links an earlier co
 ALTER TABLE rename_op ADD COLUMN cross_fs INTEGER;     -- 1: copy, verify, remove the original
 """
 
-MIGRATIONS: tuple[str, ...] = (_V1, _V2)
+# v3: two-episode files (decision 64). `episode_end` is the last episode's number of a file that
+# holds two consecutive episodes, in the same numbering as `episode`; NULL = one episode (every
+# row written before v3).
+_V3 = """
+ALTER TABLE match ADD COLUMN episode_end INTEGER;
+ALTER TABLE rename_op ADD COLUMN episode_end INTEGER;
+"""
+
+MIGRATIONS: tuple[str, ...] = (_V1, _V2, _V3)
 SCHEMA_VERSION = len(MIGRATIONS)
 
 

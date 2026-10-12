@@ -106,7 +106,7 @@ from showvenist.scoring.types import (
 )
 from showvenist.state.db import Match
 from showvenist.state.fingerprint import fingerprint
-from showvenist.state.history import History
+from showvenist.state.history import History, end_episode_id, episode_code
 
 # progress(done, total, path, error): called once per input path after it is handled
 Progress = Callable[[int, int, Path, str | None], None]
@@ -269,6 +269,13 @@ class _Named:
     reason: str | None = None
     row: bool = False  # True when it is a pinned row of the solve
     confirmed: bool = False  # read from history, not from the name
+    # a two-episode file confirmed in history (decision 64): the second episode's id. The row
+    # is pinned to `episode_id`; nobody else may take this one either
+    end_id: str | None = None
+
+    @property
+    def held(self) -> set[str]:
+        return {e for e in (self.episode_id, self.end_id) if e is not None}
 
 
 class Session:
@@ -475,7 +482,7 @@ class Session:
         done = 0
         todo: list[Path] = []
         named_nodes: list[FileNode] = []
-        hist_hits: list[tuple[Path, str, str | None]] = []
+        hist_hits: list[tuple[Path, str, str | None, str | None]] = []
         for path in paths:
             node = self._node.get(path)
             fn = node[1] if node is not None else None
@@ -600,7 +607,7 @@ class Session:
     def _add_named(self, nodes: list[FileNode]) -> None:
         rep = named_episodes(nodes, self.bundle, self._named_order())
         in_scope = {c.id for c in self.candidates}
-        held = {n.episode_id for n in self.named.values() if n.row}
+        held = {e for n in self.named.values() if n.row for e in n.held}
         for fn in nodes:
             path = Path(fn.path)
             try:
@@ -610,21 +617,38 @@ class Session:
             info = FileInfo(path=path, fingerprint=fp, duration_s=0.0,
                             disc=self._disc_name(path))
             eid = rep.resolved.get(fn.path)
+            end = self._confirmed_end(fp, eid)
             if eid is None:
                 reason = rep.unresolved.get(fn.path, "name does not resolve to an episode")
                 self.named[path] = _Named(info, None, reason)
                 self.notices.append(f"{path.name}: {reason}")
-            elif eid in held:
-                self.named[path] = _Named(info, eid, "another named file holds this episode")
+            elif eid in held or end in held:
+                self.named[path] = _Named(info, eid, "another named file holds this episode",
+                                          end_id=end)
             elif eid not in in_scope:
-                self.named[path] = _Named(info, eid, "named episode is outside this season")
+                self.named[path] = _Named(info, eid, "named episode is outside this season",
+                                          end_id=end)
             else:
-                held.add(eid)
-                self.named[path] = _Named(info, eid, None, row=True)
+                n = _Named(info, eid, None, row=True, end_id=end)
+                held |= n.held
+                self.named[path] = n
 
-    def _history_hit(self, path: Path) -> tuple[Path, str, str | None] | None:
-        """(path, fingerprint, episode id | None for an extra) when history holds a confirmed
-        decision for this file in this show; None otherwise (or with --reanalyze)."""
+    def _confirmed_end(self, fp: str, eid: str | None) -> str | None:
+        """A named file (§5.5) whose fingerprint history confirms as a two-episode file starting
+        at `eid` (decision 64): the second episode's id. The name alone (`s01e11-e12`) is read
+        as its first episode; the range comes from history."""
+        if self.history is None or not fp or eid is None:
+            return None
+        for m in self.history.confirmed_for_file(fp):
+            if m.show_slug == self.show_slug and m.episode_id == eid and m.episode_end:
+                return end_episode_id(self.bundle, eid, m.season, m.episode, m.episode_end,
+                                      self._named_order())
+        return None
+
+    def _history_hit(self, path: Path) -> tuple[Path, str, str | None, str | None] | None:
+        """(path, fingerprint, episode id | None for an extra, second episode id of a
+        two-episode file | None) when history holds a confirmed decision for this file in this
+        show; None otherwise (or with --reanalyze)."""
         if self.history is None or self.reanalyze or path in self.pins:
             return None
         try:
@@ -635,24 +659,30 @@ class Session:
         if not mine:
             return None
         if any(m.episode_id is None for m in mine):
-            return path, fp, None
-        return path, fp, mine[-1].episode_id
+            return path, fp, None, None
+        m = mine[-1]
+        end = end_episode_id(self.bundle, m.episode_id, m.season, m.episode, m.episode_end,
+                             self._named_order())
+        return path, fp, m.episode_id, end
 
-    def _add_confirmed(self, hits: list[tuple[Path, str, str | None]]) -> list[Path]:
-        """Files decided earlier: extras are reported as such, episodes become pinned rows.
-        Returns the paths that can't be pinned (episode out of scope or already held), which
-        are analyzed after all."""
+    def _add_confirmed(
+        self, hits: list[tuple[Path, str, str | None, str | None]]
+    ) -> list[Path]:
+        """Files decided earlier: extras are reported as such, episodes become pinned rows (a
+        two-episode file holds both its episodes, decision 64). Returns the paths that can't be
+        pinned (episode out of scope or already held), which are analyzed after all."""
         in_scope = {c.id for c in self.candidates}
-        held = {n.episode_id for n in self.named.values() if n.row}
+        held = {e for n in self.named.values() if n.row for e in n.held}
         back: list[Path] = []
-        for path, fp, eid in hits:
+        for path, fp, eid, end in hits:
             info = FileInfo(path=path, fingerprint=fp, duration_s=0.0,
                             disc=self._disc_name(path))
             if eid is None:
                 self.confirmed_extras[path] = info
-            elif eid in in_scope and eid not in held:
-                held.add(eid)
-                self.named[path] = _Named(info, eid, None, row=True, confirmed=True)
+            elif eid in in_scope and eid not in held and end not in held:
+                n = _Named(info, eid, None, row=True, confirmed=True, end_id=end)
+                held |= n.held
+                self.named[path] = n
             else:
                 back.append(path)
         return back
@@ -662,7 +692,7 @@ class Session:
             return None
         m = np.asarray(self.history.history_penalty(
             self.show_slug, [f.fingerprint for f in self.files], [c.id for c in cands],
-            self.config.history.penalty,
+            self.config.history.penalty, bundle=self.bundle,
         ), dtype=float)
         return m if m.any() else None
 
@@ -710,9 +740,18 @@ class Session:
             out[self._index(path)] = -1 if eid is None else col.get(eid)
         return out
 
+    def _held_ends(self, candidates: list[Candidate]) -> set[int]:
+        """Columns of the second episodes of two-episode rows (decision 64): held by the row,
+        which is pinned to its first episode, so no row may take them."""
+        col = {c.id: c.index for c in candidates}
+        return {col[n.end_id] for n in self.named_rows if n.end_id in col}
+
     @staticmethod
-    def _pinned_S(S0: np.ndarray, pins: dict[int, int | None]) -> np.ndarray:
+    def _pinned_S(S0: np.ndarray, pins: dict[int, int | None],
+                  held: Iterable[int] = ()) -> np.ndarray:
         S = S0.copy()
+        for c in held:
+            S[:, c] = NEG
         for c in pins.values():
             if c is not None and c >= 0:
                 S[:, c] = NEG  # nobody else may take the episode
@@ -723,8 +762,9 @@ class Session:
         return S
 
     @staticmethod
-    def _pin_forbidden(pins: dict[int, int | None], F: int, E: int) -> set[tuple[int, int]]:
-        out: set[tuple[int, int]] = set()
+    def _pin_forbidden(pins: dict[int, int | None], F: int, E: int,
+                       held: Iterable[int] = ()) -> set[tuple[int, int]]:
+        out: set[tuple[int, int]] = {(o, c) for c in held for o in range(F)}
         for i, c in pins.items():
             out.update((i, j) for j in range(E) if j != c)
             if c is not None and c >= 0:
@@ -849,7 +889,8 @@ class Session:
         """detect_ordering's build(): S in `ordering` (season filter recomputed, every pin
         applied by episode id), with the disc structure."""
         ev = self._evidence(ordering)
-        S = self._pinned_S(self._fused(ordering).S, self._row_pins(ev.candidates))
+        S = self._pinned_S(self._fused(ordering).S, self._row_pins(ev.candidates),
+                           self._held_ends(ev.candidates))
         discs, loose = self._disc_specs()
         return S, discs, loose
 
@@ -917,7 +958,7 @@ class Session:
     def _solve_basic(self, discs: list[DiscSpec], loose: list[int]) -> Solution:
         fused = self._fused(self.ordering)
         pins = self._row_pins(self.candidates)
-        S = self._pinned_S(fused.S, pins)
+        S = self._pinned_S(fused.S, pins, self._held_ends(self.candidates))
         assignment = assign_basic(S)
         confs = confidence(S, assignment)
         for i in pins:
@@ -990,7 +1031,8 @@ class Session:
             ev.cache = _BlockCache(S0, self.block_params)
         F, E = S0.shape
         pins = self._row_pins(self.candidates)
-        forb = self._pin_forbidden(pins, F, E)
+        held = self._held_ends(self.candidates)
+        forb = self._pin_forbidden(pins, F, E, held)
         run = self._block_run(S0, discs, loose, pins, forb, ev.cache)
         if run is None:
             return None
@@ -1015,7 +1057,7 @@ class Session:
                             decided.add(r)
                     (sol, confs), used = run_on, on
         out = self._solution(
-            self._pinned_S(S0, pins),
+            self._pinned_S(S0, pins, held),
             Assignment(list(sol.column), sol.total),
             confs,
             pins,
@@ -1272,6 +1314,10 @@ class Session:
                 raise ValueError(f"{p.name} has no evidence to explain") from None
             raise
         if i >= len(self.files):
+            n = self.named_rows[i - len(self.files)]
+            if n.confirmed:
+                raise ValueError(f"{n.info.path.name} is confirmed in history as "
+                                 f"{self._held_code(n)}: no evidence")
             raise ValueError(f"{self.rows[i].path.name} is named as an episode: no evidence")
         sol = self.solution or self.solve()
         f = sol.files[i]
@@ -1344,7 +1390,8 @@ class Session:
             if col < 0 or i in sol.pins:
                 continue
             cand = sol.candidates[col]
-            other = [m for m in self.history.confirmed_for_episode(self.show_slug, cand.id)
+            other = [m for m in self.history.confirmed_for_episode(
+                         self.show_slug, cand.id, bundle=self.bundle)
                      if m.fingerprint != f.fingerprint]
             if other:
                 out[i] = (cand.label, other[-1])
@@ -1411,7 +1458,7 @@ class Session:
         )
         assignment = Assignment([sol.assignment.column[r] for r in rows], sol.assignment.total)
         confs = [sol.confidences[r] for r in rows]
-        rep = build_report(
+        rep = self._with_ranges(build_report(
             files,
             sol.candidates,
             fused,
@@ -1422,8 +1469,38 @@ class Session:
             ordering=sol.ordering,
             season=self.season,
             flags=flags,
-        )
+        ), sol.ordering)
         return self._finish(rep, [*rep.notices, *self._notices(sol)])
+
+    def _range_ref(self, ref: EpisodeRef, end_id: str | None, ordering: str) -> EpisodeRef:
+        """`ref` with the second episode of a two-episode file (decision 64), numbered in
+        `ordering` like `ref`."""
+        if end_id is None:
+            return ref
+        ent = next((e for e in self.bundle.orderings[ordering].entries
+                    if e.episode_id == end_id), None)
+        return ref.model_copy(update={"episode_end_id": end_id,
+                                      "episode_end": ent.episode if ent is not None else None})
+
+    def _held_code(self, n: _Named) -> str:
+        ent = {e.episode_id: e for e in self.bundle.orderings[self.ordering].entries}
+        a, b = ent.get(n.episode_id or ""), ent.get(n.end_id or "")
+        if a is None:
+            return n.episode_id or "extra"
+        return episode_code(a.season, a.episode, b.episode if b is not None else None)
+
+    def _with_ranges(self, rep: Report, ordering: str) -> Report:
+        """Rows of two-episode files carry their range (decision 64)."""
+        ends = {str(n.info.path): n.end_id for n in self.named_rows if n.end_id is not None}
+        if not ends:
+            return rep
+        files = [
+            r.model_copy(update={"decision": r.decision.model_copy(update={
+                "episode": self._range_ref(r.decision.episode, ends[r.path], ordering)})})
+            if r.path in ends and r.decision.episode is not None else r
+            for r in rep.files
+        ]
+        return rep.model_copy(update={"files": files})
 
     def _dup_flags(self, dup: Path) -> list[str]:
         """`duplicate` for an exact copy; a near duplicate adds `near_duplicate`, and with
@@ -1585,6 +1662,7 @@ class Session:
             flags.append(FLAG_DUPLICATE)
         ref = EpisodeRef(episode_id=ep.id, season=ent.season, episode=ent.episode,
                          title=ep.title)
+        ref = self._range_ref(ref, n.end_id, self._named_order())
         return self._plain_row(n.info, "episode", ref, flags, high=True)
 
 

@@ -104,7 +104,7 @@ def test_match_args_follow_the_move():
     m = PlannedMove("episode", Path("a"), Path("b"), "1:a", "s", episode_id="tmdb:1",
                     season=1, episode=2, title="T", pinned=True)
     assert match_args(m) == dict(episode_id="tmdb:1", season=1, episode=2, title="T",
-                                 source="manual")
+                                 source="manual", episode_end=None)
     assert match_args(PlannedMove("extra", Path("a"), Path("b"), "1:a", "s"))["source"] == "auto"
 
 

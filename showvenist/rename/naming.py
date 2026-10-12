@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import string
 import unicodedata
 from pathlib import Path
 
@@ -43,12 +44,40 @@ def sanitize(text: str) -> str:
     return t.rstrip(". ")
 
 
+def range_template(template: str) -> str:
+    """The template for a two-episode file (decision 64): right after the first `{e...}`
+    replacement field, `-` plus the letter written just before that field (when it is `e` or
+    `E`, kept in its case) plus the field again for the last episode, with the same conversion
+    and format spec. `s{s:02}e{e:02}` -> `s01e11-e12`, `S{s:02}E{e:02}` -> `S01E11-E12`,
+    `{s}x{e:02}` -> `1x11-12`. The field is found with `string.Formatter().parse`, so literal
+    braces (`{{e}}`) are not mistaken for it. ValueError when the template has no `{e}`."""
+    out: list[str] = []
+    done = False
+    for literal, field, spec, conv in string.Formatter().parse(template):
+        out.append(literal.replace("{", "{{").replace("}", "}}"))
+        if field is None:
+            continue
+        tail = (f"!{conv}" if conv else "") + (f":{spec}" if spec else "")
+        out.append("{" + field + tail + "}")
+        if field == "e" and not done:
+            letter = literal[-1] if literal and literal[-1] in "eE" else ""
+            out.append(f"-{letter}{{e_end{tail}}}")
+            done = True
+    if not done:
+        raise ValueError("the naming template has no {e}: a two-episode file cannot be named")
+    return "".join(out)
+
+
 def episode_stem(template: str, show_title: str, season: int, episode: int,
-                 title: str | None = None) -> str:
-    """Render the naming template (`{show_snake}`, `{show}`, `{title}`, `{s}`, `{e}`)."""
+                 title: str | None = None, episode_end: int | None = None) -> str:
+    """Render the naming template (`{show_snake}`, `{show}`, `{title}`, `{s}`, `{e}`). With
+    `episode_end` (a two-episode file, decision 64) the episode part becomes a range, see
+    `range_template`; ValueError when the template cannot show one."""
+    if episode_end is not None:
+        template = range_template(template)
     out = template.format(
         show_snake=snake(show_title), show=sanitize(show_title), s=season, e=episode,
-        title=sanitize(title or ""),
+        title=sanitize(title or ""), e_end=episode_end,
     )
     out = re.sub(r"__+", "_", out).lstrip("_") if "{show_snake}" in template else out
     return limit_name(out, MAX_NAME_BYTES - 12, has_ext=False)  # room for `.ext`, `_dupe_N`, `_N`

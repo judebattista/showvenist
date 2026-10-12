@@ -18,6 +18,16 @@ class EpisodeRef(_M):
     season: int
     episode: int
     title: str
+    # A two-episode file confirmed in history (decision 64): the last episode's number in the
+    # same ordering as `episode`, and its id. None for one episode.
+    episode_end: int | None = None
+    episode_end_id: str | None = None
+
+    @property
+    def code(self) -> str:
+        """'S01E11', or 'S01E11-E12' for a two-episode file."""
+        return f"S{self.season:02d}E{self.episode:02d}" + (
+            f"-E{self.episode_end:02d}" if self.episode_end is not None else "")
 
 
 class Decision(_M):

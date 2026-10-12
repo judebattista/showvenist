@@ -63,8 +63,8 @@ def _ep_label(fr: FileReport, season: int | None) -> str:
     if fr.decision.kind == "extra" or ep is None:
         return "extra" + (f" ({_mmss(fr.duration_s)})" if fr.duration_s else "")
     if ep.season == season:
-        return f"E{ep.episode:02d} {ep.title}"
-    return f"S{ep.season:02d}E{ep.episode:02d} {ep.title}"
+        return f"{ep.code[3:]} {ep.title}"  # 'E11' or 'E11-E12'
+    return f"{ep.code} {ep.title}"
 
 
 def row_for(fr: FileReport, pre_pin_level: dict[Path, str], primary_pinned: set[Path],

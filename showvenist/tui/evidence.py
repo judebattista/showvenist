@@ -68,7 +68,7 @@ def render_detail(fr: FileReport | None, detail: FileDetail | None, path: Path,
     if fr is not None:
         ep = fr.decision.episode
         chosen = ("extra" if fr.decision.kind == "extra" or ep is None
-                  else f"S{ep.season:02d}E{ep.episode:02d} {ep.title}")
+                  else f"{ep.code} {ep.title}")
         parts.append(Text(f"Chosen: {chosen}  ({fr.confidence.level}, {fr.confidence.odds})"))
         banner = flags_banner(fr)
         if banner:

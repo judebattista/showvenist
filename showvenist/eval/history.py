@@ -1,17 +1,20 @@
 """`eval --from-history` (spec §16.1): manifest rows and negative labels from state.db.
 
 Confirmed episode matches become positive labels written as `@<episode id>` (matches keep the
-numbering they were recorded with but not the ordering's name), confirmed extras `extra`.
+numbering they were recorded with but not the ordering's name), confirmed extras `extra`. A
+two-episode file (decision 64) becomes the set label `@<first id>+@<second id>` (decision 50)
+when the show's bundle is at hand to find the second episode, else `@<first id>`.
 Rejected matches are negative labels: they only add one line to the eval output."""
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from showvenist.bundle.schema import Bundle
 from showvenist.eval.types import FileDecision, ManifestRow, Problem
-from showvenist.state.history import History
+from showvenist.state.history import History, held_episode_ids
 
 
 @dataclass
@@ -22,15 +25,18 @@ class HistoryLabels:
     problems: list[Problem] = field(default_factory=list)  # files that no longer exist
 
 
-def history_labels(history: History, shows: Iterable[str] | None = None) -> HistoryLabels:
+def history_labels(history: History, shows: Iterable[str] | None = None,
+                   bundle_of: Callable[[str], Bundle | None] | None = None) -> HistoryLabels:
     out = HistoryLabels()
     for slug in sorted(set(shows) if shows is not None else history.shows()):
+        bundle = bundle_of(slug) if bundle_of is not None else None
         for m in history.confirmed(slug):
             f = history.get_file(m.fingerprint)
             if f is None:
                 continue
-            row = ManifestRow(f.last_path, slug, "extra" if m.episode_id is None
-                              else f"@{m.episode_id}")
+            label = ("extra" if m.episode_id is None
+                     else "+".join(f"@{e}" for e in held_episode_ids(bundle, m)))
+            row = ManifestRow(f.last_path, slug, label)
             if not Path(f.last_path).is_file():
                 out.problems.append(Problem(row, "file no longer exists at its last known path"))
             else:

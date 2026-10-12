@@ -170,7 +170,8 @@ def _recovered_match(c, hist: History, op: RenameOp, row) -> tuple[int | None, b
     move = PlannedMove(
         kind=op.kind, old=Path(op.old_path), new=Path(op.new_path), fingerprint=op.fingerprint,
         show_slug=op.show_slug, episode_id=op.episode_id if op.kind != "extra" else None,
-        season=row["season"], episode=row["episode"], title=row["title"],
+        season=row["season"], episode=row["episode"], episode_end=row["episode_end"],
+        title=row["title"],
         pinned=row["match_source"] == "manual", confidence=row["confidence"],
         confirmed=bool(row["prior_match"]), disc=row["disc_label"],
     )
@@ -353,8 +354,8 @@ def apply_plan(
             cur = c.execute(
                 "insert into rename_op (run_id, fingerprint, kind, old_path, new_path, status,"
                 " show_slug, episode_id, dupe_index, season, episode, title, match_source,"
-                " confidence, bundle_revision, disc_label, prior_match, cross_fs)"
-                " values (?,?,?,?,?,'planned',?,?,?,?,?,?,?,?,?,?,?,?)",
+                " confidence, bundle_revision, disc_label, prior_match, cross_fs, episode_end)"
+                " values (?,?,?,?,?,'planned',?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (run_id, move.fingerprint, move.kind, str(move.old), str(new), move.show_slug,
                  move.episode_id if move.kind in ("episode", "duplicate") else None,
                  move.dupe_index,
@@ -365,7 +366,8 @@ def apply_plan(
                  plan.bundle_revision if video else None,
                  move.disc if video else None,
                  int(move.confirmed) if video else None,
-                 int(id(move) in cross_ids)),
+                 int(id(move) in cross_ids),
+                 move.episode_end if video else None),
             )
             op_id = int(cur.lastrowid)
         mover = move_across if id(move) in cross_ids else rename
@@ -436,5 +438,5 @@ def match_args(move: PlannedMove) -> dict:
     """Keyword arguments for `History.confirm` describing what a move decided."""
     return dict(
         episode_id=move.episode_id, season=move.season, episode=move.episode, title=move.title,
-        source="manual" if move.pinned else "auto",
+        source="manual" if move.pinned else "auto", episode_end=move.episode_end,
     )

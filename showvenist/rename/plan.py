@@ -36,7 +36,7 @@ from showvenist.rename import naming
 from showvenist.rename.sidecars import find_sidecars
 from showvenist.rename.types import Plan, PlannedMove, PlanOptions, SkippedFile
 from showvenist.report_schema import FileReport, Report
-from showvenist.state.history import History
+from showvenist.state.history import History, episode_code
 
 IGNORE_FILE = ".showvenist-ignore"
 EXTRAS_DIR = "extras"
@@ -91,6 +91,8 @@ class _Video:
     episode_id: str | None = None
     season: int | None = None
     episode: int | None = None
+    episode_end: int | None = None  # a two-episode file's last episode (decision 64)
+    end_id: str | None = None  # and its id
     title: str | None = None
     stem: str | None = None  # the episode name (episodes and duplicates)
     pinned: bool = False
@@ -119,6 +121,10 @@ def _ignored(old: Path, exists: Callable[[Path], bool]) -> bool:
     return any(exists(d / IGNORE_FILE) for d in old.parents)
 
 
+def _code(v: _Video) -> str:
+    return episode_code(v.season, v.episode, v.episode_end)
+
+
 def _flags_text(fr: FileReport) -> str:
     return f" [{', '.join(fr.flags)}]" if fr.flags else ""
 
@@ -143,7 +149,10 @@ def build_plan(
     `out_of_scope` files. Skipped files are listed with a `SkipReason`.
     - Episodes: `<naming_order season folder>/<template>.<ext>`, flattened out of the disc
       folder; season/episode numbers come from `bundle.orderings[naming_order]` for the
-      decided episode id (not necessarily the ordering that was solved).
+      decided episode id (not necessarily the ordering that was solved). A two-episode file
+      (`EpisodeRef.episode_end_id`, decision 64) is named with the range (`s01e11-e12`,
+      `naming.range_template`); it is skipped (`cannot_name`) when its two episodes are not
+      consecutive in the naming order or the template has no `{e}`.
     - Extras: `<Season>/extras/` with `naming.extra_name(disc folder, original)`; a confirmed
       extra in `history` is skipped.
     - Duplicates (`FileReport.duplicate_of`): stay in their own folder, renamed in place with
@@ -219,10 +228,22 @@ def build_plan(
                      f"the episode has no number in the naming order {order_key!r}")
                 continue
             v.episode_id, v.season, v.episode = ref.episode_id, ent.season, ent.episode
+            if ref.episode_end_id is not None:  # a two-episode file (decision 64)
+                end = entries.get(ref.episode_end_id)
+                if end is None or end.season != ent.season or end.episode != ent.episode + 1:
+                    skip(old, "cannot_name",
+                         f"its two episodes are not consecutive in the naming order "
+                         f"{order_key!r}")
+                    continue
+                v.episode_end, v.end_id = end.episode, ref.episode_end_id
             ep = episodes.get(ref.episode_id)
             v.title = ep.title if ep is not None else ref.title
-            v.stem = naming.episode_stem(opts.template, bundle.show.title, ent.season,
-                                         ent.episode, v.title)
+            try:
+                v.stem = naming.episode_stem(opts.template, bundle.show.title, ent.season,
+                                             ent.episode, v.title, episode_end=v.episode_end)
+            except ValueError as e:
+                skip(old, "cannot_name", str(e))
+                continue
         eligible[old] = v
         if old in exclude:
             skip(old, "excluded", "unticked")
@@ -250,6 +271,11 @@ def build_plan(
     placed: dict[Path, Path | None] = {}  # primaries with a target: new path (None = in place)
     eps = sorted((v for v in videos if v.kind == "episode"),
                  key=lambda v: (v.season, v.episode, str(v.old)))
+    ends = {v.end_id: v for v in eps if v.end_id is not None}
+    for v in eps:  # a two-episode file holds its second episode too (decision 64)
+        if v.episode_id in ends:
+            plan.notices.append(f"{v.old.name}: {_code(v)} is also held by the two-episode "
+                                f"file {ends[v.episode_id].old.name} ({_code(ends[v.episode_id])})")
     extras = sorted((v for v in videos if v.kind == "extra"), key=lambda v: str(v.old))
     for v in eps + extras:
         season_dir, disc_dir = _season_dir(v.old, v.fr.disc, v.fr.explicit)
@@ -259,7 +285,7 @@ def build_plan(
             if folder_season is not None and folder_season != v.season:
                 if not v.pinned:
                     skip(v.old, "out_of_scope",
-                         f"S{v.season:02d}E{v.episode:02d} in {order_key!r} is not in "
+                         f"{_code(v)} in {order_key!r} is not in "
                          f"{season_dir.name!r}: pin it to change season")
                     continue
                 sib = [season_dir.parent / n for n in sorted(_listdir(season_dir.parent))
@@ -273,7 +299,7 @@ def build_plan(
                                     f"{sib[0].name!r} (pinned)")
                 season_dir = sib[0]
             target = season_dir / f"{v.stem}{ext}"
-            v.reason = (f"S{v.season:02d}E{v.episode:02d} {v.title}, "
+            v.reason = (f"{_code(v)} {v.title}, "
                         f"{v.fr.confidence.level} {v.fr.confidence.odds}{_flags_text(v.fr)}")
         else:
             target = season_dir / EXTRAS_DIR / naming.extra_name(disc_dir, v.old.name)
@@ -328,9 +354,9 @@ def build_plan(
                 if free(target):
                     break
             v = _Video(fr, old, "duplicate", episode_id=eid, season=prim.season,
-                       episode=prim.episode, title=prim.title, stem=stem, pinned=prim.pinned,
-                       dupe_index=x, primary_old=prim.old)
-            v.reason = (f"duplicate of {prim.old.name} (S{prim.season:02d}E{prim.episode:02d}),"
+                       episode=prim.episode, episode_end=prim.episode_end, title=prim.title,
+                       stem=stem, pinned=prim.pinned, dupe_index=x, primary_old=prim.old)
+            v.reason = (f"duplicate of {prim.old.name} ({_code(prim)}),"
                         f" stays in its folder{_flags_text(fr)}")
             taken.add(target)
             planned.append((v, target, None))
@@ -343,8 +369,9 @@ def build_plan(
         plan.moves.append(PlannedMove(
             kind=v.kind,  # type: ignore[arg-type]
             old=v.old, new=target, fingerprint=v.fr.fingerprint, show_slug=report.show_slug,
-            episode_id=v.episode_id, season=v.season, episode=v.episode, title=v.title,
-            dupe_index=v.dupe_index, collision_index=n, pinned=v.pinned,
+            episode_id=v.episode_id, season=v.season, episode=v.episode,
+            episode_end=v.episode_end, title=v.title, dupe_index=v.dupe_index,
+            collision_index=n, pinned=v.pinned,
             confidence=level,  # type: ignore[arg-type]
             reason=v.reason, confirmed=v.confirmed, disc=v.fr.disc,
             primary=index_of.get(v.primary_old) if v.primary_old is not None else None,

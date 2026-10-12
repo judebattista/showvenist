@@ -13,6 +13,7 @@ from rich.text import Text
 
 from showvenist.rename.types import ApplyResult, Plan, RecoveryReport, UndoResult
 from showvenist.state.db import RenameOp
+from showvenist.state.history import episode_code
 
 
 def _console(buf: io.StringIO) -> Console:
@@ -123,12 +124,23 @@ def format_ops(ops: list[RenameOp]) -> str:
     t = Table(title=Text(f"Moves to reverse ({len(ops)})"
                          + (f", under {root}" if root is not None else "")),
               title_justify="left")
-    for col in ("Kind", "Now at", "Back to"):
+    for col in ("Kind", "Episode", "Now at", "Back to"):
         t.add_column(col, overflow="fold")
     for o in ops:
-        t.add_row(*_row(o.kind, _rel(Path(o.new_path), root), _rel(Path(o.old_path), root)))
+        t.add_row(*_row(o.kind, _op_episode(o), _rel(Path(o.new_path), root),
+                        _rel(Path(o.old_path), root)))
     con.print(t)
     return buf.getvalue()
+
+
+def _op_episode(o: RenameOp) -> str:
+    """What a journaled move decided: 'S01E11', 'S01E11-E12' (decision 64), 'extra'; '' for a
+    sidecar or a row journaled before schema v2."""
+    if o.kind == "extra":
+        return "extra"
+    if o.kind == "sidecar" or o.season is None or o.episode is None:
+        return ""
+    return episode_code(o.season, o.episode, o.episode_end)
 
 
 def format_undo(res: UndoResult) -> str:
