@@ -129,6 +129,16 @@ def parse_named(name: str, patterns: Sequence[str] | None = None) -> NamedEpisod
     return None
 
 
+_TITLE_RE = re.compile(r"_t(\d{2,3})$", re.IGNORECASE)
+
+
+def parse_title_index(name: str) -> int | None:
+    """MakeMKV's title index from a file name (`B1_t03.mkv` -> 3, `title_t00.mkv` -> 0); None
+    when the stem doesn't end in `_tNN` (spec §11.5, decision 63)."""
+    m = _TITLE_RE.search(Path(name).stem)
+    return int(m.group(1)) if m else None
+
+
 def parse_tag_season(tag: str, patterns: Sequence[str] | None = None) -> int | None:
     """Season named by a title tag, with or without a disc ('Babylon 5 - Season 2', 'S3D2')."""
     s = parse_season(tag, patterns)

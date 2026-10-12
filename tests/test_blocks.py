@@ -503,9 +503,9 @@ def test_block_confidence_reuses_untouched_discs(monkeypatch):
     calls: list[tuple] = []
     real = blocks_mod._block_score_uncached
 
-    def counting(S_, files, a, b, u, forbidden):
+    def counting(S_, files, a, b, u, forbidden, *rest):
         calls.append((files, a, b, forbidden))
-        return real(S_, files, a, b, u, forbidden)
+        return real(S_, files, a, b, u, forbidden, *rest)
 
     monkeypatch.setattr(blocks_mod, "_block_score_uncached", counting)
     sol = solve_blocks(S, discs)

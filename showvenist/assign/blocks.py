@@ -41,6 +41,20 @@ such an alternative beats the sequential total, Δ = 0 and the file goes to revi
 column as runner-up; it is never reported as a confident extra.
 
 Rows of S in neither a disc nor `loose` are outside the solve: column −1, low confidence.
+
+Title-order tie-breaker (§11.5, decision 63), for a disc given `titles` and a weight w > 0.
+It works in two stages inside the block score, so it can never change which positions a block
+claims, nor which files claim them:
+1. the block's basic assignment (above) fixes the matched files and the matched columns;
+2. the matched files that have a title index are re-matched among the columns they hold, with
+   S − w · min(d², 4), where d = (rank of the file's title among them) − (rank of the column
+   among them). Ranks are taken within that matched set, so extras ripped first (play-all,
+   t00) shift nothing, and the quadratic makes every adjacent crossing cost exactly 2w whatever
+   else is out of place (|d| ties as soon as one file is out of order). The cap bounds what
+   one file can pay (4w), so a far crossing never costs more than 8w.
+A disc already in title order pays nothing, so its score is unchanged. Confidence re-solves the
+same objective: with evidence tied, the best alternative is an adjacent swap, so the bonus on
+its own gives Δ ≤ 2w (0.6 nats at the default), far below high.
 """
 
 from __future__ import annotations
@@ -49,8 +63,9 @@ import math
 from collections.abc import Iterable, Sequence
 
 import numpy as np
+from scipy.optimize import linear_sum_assignment
 
-from showvenist.assign.basic import assign_basic
+from showvenist.assign.basic import NEG, assign_basic
 from showvenist.assign.types import BlockParams, BlockSolution, DiscSpec
 from showvenist.scoring.types import FileConfidence, level_of
 
@@ -64,11 +79,49 @@ def _ordered(discs: Sequence[DiscSpec]) -> list[DiscSpec]:
     return list(discs)
 
 
+TITLE_ORDER_CAP = 4  # d² is capped here: one file pays at most 4w
+
+
+def _title_order(
+    sub: np.ndarray,
+    titles: tuple[int | None, ...],
+    cols: list[int],
+    forb: set[tuple[int, int]],
+    w: float,
+) -> tuple[float, list[int]]:
+    """Stage 2 of the tie-breaker (module docstring): (change in the block total, columns).
+    `cols` are local block columns per disc file (−1 = unmatched)."""
+    ks = [k for k, c in enumerate(cols) if c >= 0 and titles[k] is not None]
+    if len(ks) < 2:
+        return 0.0, cols
+    rank = {k: r for r, k in enumerate(sorted(ks, key=lambda k: titles[k]))}
+    held = sorted(cols[k] for k in ks)
+    M = np.empty((len(ks), len(held)))
+    for p, k in enumerate(ks):
+        for q, c in enumerate(held):
+            d = rank[k] - q
+            M[p, q] = NEG if (k, c) in forb else sub[k, c] - w * min(d * d, TITLE_ORDER_CAP)
+    rows, picks = linear_sum_assignment(M, maximize=True)
+    before = float(sum(sub[k, cols[k]] for k in ks))  # stage 1's own matching is feasible
+    out = list(cols)
+    for p, q in zip(rows, picks, strict=True):
+        out[ks[p]] = held[q]
+    return float(M[rows, picks].sum()) - before, out
+
+
 def _block_score_uncached(
-    S: np.ndarray, files: tuple[int, ...], a: int, b: int, u: float, forbidden: frozenset
+    S: np.ndarray,
+    files: tuple[int, ...],
+    a: int,
+    b: int,
+    u: float,
+    forbidden: frozenset,
+    titles: tuple[int | None, ...] | None = None,
+    w: float = 0.0,
 ) -> tuple[float, list[int] | None]:
     """One block evaluation: (score, column per disc file) or (−inf, None) if infeasible.
-    `forbidden` holds global (row, column) pairs already filtered to this disc and block."""
+    `forbidden` holds global (row, column) pairs already filtered to this disc and block.
+    With `titles` and w > 0, the matched files are re-matched in title order (stage 2)."""
     L = b - a
     if not files:
         return -u * L, []
@@ -78,11 +131,17 @@ def _block_score_uncached(
     res = assign_basic(sub, forb)
     if not math.isfinite(res.total):
         return NEG_INF, None
-    return res.total - u * L, [a + c if c >= 0 else -1 for c in res.column]
+    total, cols = res.total, list(res.column)
+    if titles is not None and w > 0:
+        change, cols = _title_order(sub, titles, cols, forb, w)
+        total += change
+    return total - u * L, [a + c if c >= 0 else -1 for c in cols]
 
 
 class _BlockCache:
-    """Block scores keyed by (disc key, a, b, forbidden pairs that can affect that block)."""
+    """Block scores keyed by (disc key, title indices, a, b, forbidden pairs that can affect
+    that block). The titles are part of the key, so one cache serves a disc solved with and
+    without the title-order tie-breaker."""
 
     def __init__(self, S: np.ndarray, params: BlockParams):
         self.S = S
@@ -93,11 +152,13 @@ class _BlockCache:
         self, disc: DiscSpec, a: int, b: int, touching: Sequence[tuple[int, int]]
     ) -> tuple[float, list[int] | None]:
         rel = frozenset((i, j) for i, j in touching if j == -1 or a <= j < b)
-        key = (disc.key, a, b, rel)
+        w = self.params.title_order_weight
+        titles = disc.titles if w > 0 else None
+        key = (disc.key, titles, a, b, rel)
         hit = self.store.get(key)
         if hit is None:
             u = 0.0 if disc.incomplete else self.params.unclaimed_penalty
-            hit = _block_score_uncached(self.S, disc.files, a, b, u, rel)
+            hit = _block_score_uncached(self.S, disc.files, a, b, u, rel, titles, w)
             self.store[key] = hit
         return hit
 

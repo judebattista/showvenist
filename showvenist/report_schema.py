@@ -58,6 +58,8 @@ class FileDetail(_M):
     duration_s: float
     regime: Literal["base", "llm"]
     candidates: list[CandidateDetail] = []
+    # title-order tie-breaker line (§11.5, decision 63) for a file on a disc with title indexes
+    title_order: str | None = None
 
     @property
     def signals(self) -> list[list[SignalContribution]]:

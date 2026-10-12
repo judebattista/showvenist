@@ -38,7 +38,7 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
@@ -59,13 +59,15 @@ from showvenist.assign.basic import NEG, assign_basic
 from showvenist.assign.blocks import _BlockCache, _ordered, _solve
 from showvenist.assign.confidence import confidence
 from showvenist.assign.ordering import detect_ordering
-from showvenist.assign.types import BlockParams, DiscSpec, OrderingChoice
+from showvenist.assign.titleorder import Item, TitleOrderVerdict, history_groups, judge
+from showvenist.assign.types import BlockParams, BlockSolution, DiscSpec, OrderingChoice
 from showvenist.bundle.schema import Bundle, lang_codes
 from showvenist.bundle.store import slugify
 from showvenist.config import Config
 from showvenist.edgeflags import play_all, possible_two_parter
 from showvenist.fusion import fuse
 from showvenist.hierarchy.marker import _find_ordering, named_episodes
+from showvenist.hierarchy.parse import parse_title_index
 from showvenist.hierarchy.types import DiscNode, FileNode, Marker, SeasonNode, ShowNode
 from showvenist.report import _decision, _signals, build_report, format_odds, note_lines
 from showvenist.report import _version as report_version
@@ -234,6 +236,12 @@ class Solution:
     loose: list[int] = field(default_factory=list)  # rows with no disc
     out_of_scope: dict[int, Candidate] = field(default_factory=dict)  # row -> what it points to
     notices: list[str] = field(default_factory=list)
+    # Title-order tie-breaker (§11.5, decision 63): the verdict (None when no disc has two
+    # files with a title index, or no blocks), the rows of discs it applies to, and the rows
+    # whose choice it changed or rests on (their content margin is below the tie-breaker's).
+    title_order: TitleOrderVerdict | None = None
+    title_rows: set[int] = field(default_factory=set)
+    title_decided: set[int] = field(default_factory=set)
 
     @property
     def regimes(self) -> list[Regime]:
@@ -313,6 +321,7 @@ class Session:
         self.block_params = block_params or BlockParams(
             b.unclaimed_penalty, b.gap_penalty, b.ordering_threshold,
             block_slack=b.block_slack, ordering_margin=b.ordering_margin,
+            title_order_weight=b.title_order_weight,
         )
         self.cache = cache
         if ordering not in bundle.orderings:
@@ -363,6 +372,7 @@ class Session:
         self._choice: OrderingChoice | None = None
         self._oos: dict[str, tuple[list[Candidate], np.ndarray] | None] = {}
         self._window_failed: set[int] = set()
+        self._moves: list[tuple[str, int, int]] | None = None  # history: confirmed moves
         self.notices: list[str] = []  # session-level (unresolved names, skipped files)
 
     # ---- scope -----------------------------------------------------------------------------
@@ -914,17 +924,14 @@ class Session:
             confs[i] = FileConfidence(math.inf, "high", None, None)
         return self._solution(S, assignment, confs, pins, discs, loose, used_blocks=False)
 
-    def _solve_blocks(self, discs: list[DiscSpec], loose: list[int]) -> Solution | None:
-        ev = self._evidence(self.ordering)
-        fused = self._fused(self.ordering)
-        S0 = fused.S
-        if ev.cache is None:
-            ev.cache = _BlockCache(S0, self.block_params)
-        F, E = S0.shape
-        pins = self._row_pins(self.candidates)
-        forb = self._pin_forbidden(pins, F, E)
+    def _block_run(
+        self, S0: np.ndarray, discs: list[DiscSpec], loose: list[int], pins, forb,
+        cache: _BlockCache,
+    ) -> tuple[BlockSolution, list[FileConfidence]] | None:
+        """The block DP and its confidence by exact re-solve (§11.7); None if infeasible."""
+        F = S0.shape[0]
         p = self.block_params
-        sol = _solve(S0, discs, loose, p, frozenset(forb), ev.cache)
+        sol = _solve(S0, discs, loose, p, frozenset(forb), cache)
         if not math.isfinite(sol.total):
             return None
         in_solve = {f for d in discs for f in d.files} | set(loose)
@@ -936,22 +943,96 @@ class Session:
             if i not in in_solve:
                 confs.append(FileConfidence(0.0, "low", None, None))
                 continue
-            alt = _solve(S0, discs, loose, p, frozenset(forb | {(i, sol.column[i])}), ev.cache)
+            alt = _solve(S0, discs, loose, p, frozenset(forb | {(i, sol.column[i])}), cache)
             if not math.isfinite(alt.total):
                 confs.append(FileConfidence(math.inf, "high", None, None))
                 continue
             delta = max(0.0, sol.total - alt.total)
             confs.append(FileConfidence(delta, level_of(delta), alt.column[i], delta))
-        return self._solution(
+        return sol, confs
+
+    def _row_titles(self) -> list[int | None]:
+        """MakeMKV title index per row (§11.5): from the file name; a row with duplicates takes
+        the lowest index among its copies (MakeMKV lists the main title first)."""
+        rows = self.rows
+        out = [parse_title_index(f.path.name) for f in rows]
+        row_of = {f.path: r for r, f in enumerate(rows)}
+        for dup, primary in self.duplicates.items():
+            r, t = row_of.get(primary), parse_title_index(dup.name)
+            if r is not None and t is not None and (out[r] is None or t < out[r]):
+                out[r] = t
+        return out
+
+    def _title_evidence(
+        self, discs: list[DiscSpec], titles: list[int | None], sol: BlockSolution,
+        confs: list[FileConfidence], pins,
+    ) -> TitleOrderVerdict:
+        """The strict verdict (decision 63) from the solve WITHOUT the tie-breaker: each disc's
+        confident files (high or medium, or pinned) with a title index, then the confirmed
+        moves of earlier runs from history."""
+        names = ({d.key: disc_label(d) for d in self.season_node.discs}
+                 if self.season_node is not None else {})
+        groups: dict[str, list[Item]] = {}
+        for d in _ordered(discs):
+            groups[names.get(d.key, d.key)] = [
+                (titles[r], sol.column[r]) for r in d.files
+                if titles[r] is not None and sol.column[r] >= 0
+                and (r in pins or confs[r].level in ("high", "medium"))
+            ]
+        if self.history is not None:
+            if self._moves is None:
+                self._moves = self.history.confirmed_moves(self.show_slug)
+            for label, items in history_groups(self._moves).items():
+                groups.setdefault(f"{label} (history)", items)
+        return judge(groups)
+
+    def _solve_blocks(self, discs: list[DiscSpec], loose: list[int]) -> Solution | None:
+        """The block DP. With the title-order tie-breaker (§11.5, decision 63): a first solve
+        without it gives the confident files for the verdict; when the verdict is on, the
+        season is solved again with it (block scores of untouched discs come from the cache)."""
+        ev = self._evidence(self.ordering)
+        fused = self._fused(self.ordering)
+        S0 = fused.S
+        if ev.cache is None:
+            ev.cache = _BlockCache(S0, self.block_params)
+        F, E = S0.shape
+        pins = self._row_pins(self.candidates)
+        forb = self._pin_forbidden(pins, F, E)
+        run = self._block_run(S0, discs, loose, pins, forb, ev.cache)
+        if run is None:
+            return None
+        sol, confs = run
+        verdict, title_rows, decided, used = None, set(), set(), discs
+        titles = self._row_titles()
+        w = self.block_params.title_order_weight
+        titled = [d for d in discs if sum(titles[r] is not None for r in d.files) >= 2]
+        if w > 0 and titled:
+            verdict = self._title_evidence(discs, titles, sol, confs, pins)
+            title_rows = {r for d in titled for r in d.files if titles[r] is not None}
+            if verdict.use:
+                on = [replace(d, titles=tuple(titles[r] for r in d.files)) if d in titled
+                      else d for d in discs]
+                run_on = self._block_run(S0, on, loose, pins, forb, ev.cache)
+                if run_on is not None:
+                    for r in title_rows:
+                        moved = run_on[0].column[r] != sol.column[r]
+                        lifted = (confs[r].delta < 2 * w
+                                  and run_on[1][r].delta > confs[r].delta + 1e-9)
+                        if r not in pins and (moved or lifted):
+                            decided.add(r)
+                    (sol, confs), used = run_on, on
+        out = self._solution(
             self._pinned_S(S0, pins),
             Assignment(list(sol.column), sol.total),
             confs,
             pins,
-            discs,
+            used,
             loose,
             used_blocks=True,
             blocks=dict(sol.blocks),
         )
+        out.title_order, out.title_rows, out.title_decided = verdict, title_rows, decided
+        return out
 
     def _out_of_scope(self, sol: Solution) -> dict[int, Candidate]:
         """§11.3: rows whose best out-of-scope score beats their assigned score by more than
@@ -1221,8 +1302,9 @@ class Session:
                 signals=_signals(i, regime, sol.fused, j, None, False), notes=notes,
                 synopsis=syn, runtime_min=c.episode.runtime_min,
             ))
+        to = sol.title_order.line() if sol.title_order and i in sol.title_rows else None
         return FileDetail(path=str(f.path), duration_s=f.duration_s, regime=regime,
-                          candidates=cands)
+                          candidates=cands, title_order=to)
 
     # ---- report ----------------------------------------------------------------------------
 
@@ -1463,6 +1545,9 @@ class Session:
                 f"{sol.files[i].path.name}: evidence points to {c.label} ({c.episode.title}), "
                 "outside this season; it was not moved there (pin it to change season)"
             )
+        if sol is not None and sol.title_order is not None:
+            for i in sorted(sol.title_decided):
+                out.append(f"{sol.files[i].path.name}: {sol.title_order.line()}")
         out += self._near_notices(sol)
         out += self._history_notices(sol)
         waiting: dict[str, int] = {}

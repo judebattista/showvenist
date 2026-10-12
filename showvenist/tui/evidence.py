@@ -103,6 +103,8 @@ def render_detail(fr: FileReport | None, detail: FileDetail | None, path: Path,
         for k, c in enumerate(cands):
             if c.notes:
                 parts.append(Text(f"Notes ({LETTERS[k]}): " + " · ".join(c.notes[:6])))
+        if detail.title_order:
+            parts.append(Text(detail.title_order[:1].upper() + detail.title_order[1:] + "."))
         for k, c in enumerate(cands):
             if c.synopsis:
                 parts.append(Text(f"Synopsis ({LETTERS[k]}): {c.synopsis}", style="dim"

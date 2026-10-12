@@ -29,6 +29,9 @@ ORDERING_THRESHOLD_DEFAULT = 15.0  # block total short of basic total by more th
 # its own. Each extra position still costs u when unclaimed (§14 "Skipped titles").
 BLOCK_SLACK_DEFAULT = 1
 ORDERING_MARGIN_DEFAULT = 4.0
+# Title-order tie-breaker (§11.5, decision 63): nats per unit of squared rank displacement,
+# so an adjacent swap costs 2w. 0 disables it.
+TITLE_ORDER_WEIGHT_DEFAULT = 0.3
 
 
 @dataclass(frozen=True)
@@ -40,6 +43,8 @@ class BlockParams:
     # another ordering must beat the starting one by more than this to be chosen (hysteresis);
     # `ordering_threshold` is the separate bar for discarding blocks that fit badly
     ordering_margin: float = ORDERING_MARGIN_DEFAULT
+    # title-order tie-breaker inside blocks; applies only to discs given `titles`
+    title_order_weight: float = TITLE_ORDER_WEIGHT_DEFAULT
 
 
 @dataclass(frozen=True)
@@ -52,6 +57,9 @@ class DiscSpec:
     incomplete: bool = False  # u = 0 and the upper boundary is left open (§11.5)
     fixed: tuple[int, int] | None = None  # block [a, b) confirmed in history (M5)
     free_gap_before: bool = False  # disc numbers skip here (folders 1, 2, 4): the gap is free
+    # MakeMKV title index per file (parallel to `files`, None = no index). Set only when the
+    # title-order verdict is on (§11.5): None turns the tie-breaker off for this disc.
+    titles: tuple[int | None, ...] | None = None
 
 
 @dataclass
