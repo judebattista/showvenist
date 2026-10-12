@@ -526,7 +526,7 @@ It ends with a plain-language prediction, e.g. *"Season 2: synopsis coverage 40%
   - conflicts new or resolved; show-level changes such as `in_production`;
   - **history impact:** read-only from `state.db`, the confirmed matches whose episodes were removed or renumbered (file, old episode, new episode). Nothing in history is changed.
 - After the diff it asks y/N (`--yes` skips the question and is needed without a TTY); `--diff` prints and writes nothing. On accept the old `show.json` is kept as `show.json.prev` (one generation); `overrides.yaml` is never touched, and after a refresh overrides that point at episodes that no longer exist produce warnings.
-- `identify` warns when a bundle is older than 30 days (configurable) **and** TMDB reports the show as still in production, and the warning names `ingest SHOW --refresh --diff`.
+- `identify` warns (stderr) when a bundle is older than `[ingest] stale_days` (default 30) **and** was recorded as still in production; it uses the stored `in_production` and the fetch time, so it makes no network call. The warning names `ingest SHOW --refresh --diff`.
 - Later: flag library files that were named with numbering that has since changed.
 
 ---

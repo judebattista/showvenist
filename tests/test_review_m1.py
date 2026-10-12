@@ -93,5 +93,5 @@ def test_ingest_refuses_overwrite_until_refresh(tmp_path, monkeypatch):
     assert runner.invoke(cli.app, args).exit_code == 0
     again = runner.invoke(cli.app, args)
     assert again.exit_code == 1 and "--refresh" in again.output
-    assert runner.invoke(cli.app, [*args, "--refresh"]).exit_code == 0
+    assert runner.invoke(cli.app, [*args, "--refresh", "--yes"]).exit_code == 0
     assert load_bundle("firefly-2002", tmp_path) and bundle_path("firefly-2002", tmp_path).exists()

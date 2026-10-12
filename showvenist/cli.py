@@ -62,36 +62,121 @@ def _pick(cands: list[dict]) -> int:
     return cands[n - 1]["tmdb_id"]
 
 
+def _tvmaze():
+    from showvenist.adapters.tvmaze import TvmazeAdapter
+
+    return TvmazeAdapter()
+
+
+def _run_editor(path: Path) -> int:
+    import os
+    import shlex
+    import subprocess
+
+    cmd = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "vi"
+    try:
+        return subprocess.run([*shlex.split(cmd), str(path)], check=False).returncode
+    except OSError as e:
+        typer.echo(f"cannot run the editor {cmd!r}: {e}", err=True)
+        return 127
+
+
 @app.command()
 def ingest(
     show: str = typer.Argument(..., help="Show title"),
-    ref: list[str] = typer.Option([], "--ref", help="TMDB or IMDb URL/ID"),
+    ref: list[str] = typer.Option([], "--ref", help="TMDB, TVmaze or IMDb URL/ID"),
+    source: str | None = typer.Option(
+        None, "--source", help="Sources to fetch, comma-separated (default: [ingest] sources "
+        "in config.toml, tmdb,tvmaze)"),
     subs: Path | None = typer.Option(None, "--subs", help="Folder of reference .srt files"),
     year: int | None = typer.Option(None, "--year"),
     tmdb_id: int | None = typer.Option(None, "--tmdb-id"),
-    refresh: bool = typer.Option(False, "--refresh", help="Replace an existing bundle"),
+    refresh: bool = typer.Option(False, "--refresh", help="Re-fetch an existing bundle and "
+                                 "show what changed before writing"),
+    diff: bool = typer.Option(False, "--diff", help="With --refresh: print the diff and write "
+                              "nothing"),
+    yes: bool = typer.Option(False, "--yes", help="Skips the y/N before writing a refresh "
+                             "(needed without a terminal)"),
     out: Path | None = typer.Option(None, "-o", help="Bundle root directory"),
 ) -> None:
     """Build a show's reference bundle and print its data-quality report."""
-    from showvenist.adapters.tmdb import TmdbError
-    from showvenist.bundle.ingest import IngestError
-    from showvenist.bundle.ingest import ingest as run_ingest
-    from showvenist.bundle.quality import quality_report, render
+    from pydantic import ValidationError
 
+    from showvenist.adapters.tmdb import TmdbError
+    from showvenist.bundle import ingest as ing
+    from showvenist.bundle.quality import quality_report, render
+    from showvenist.config import IngestConfig, load_config
+
+    if diff and not refresh:
+        _fail("--diff goes with --refresh")
+    if refresh and not diff and not yes and not _interactive():
+        _fail("ingest --refresh: no TTY to ask on, so nothing is written; add --yes to write "
+              "the refresh, or --diff to only see what would change")
     try:
-        bundle, bdir, scan = run_ingest(
+        cfg = load_config()
+        sources = (IngestConfig(sources=source.split(",")).sources if source
+                   else cfg.ingest.sources)
+    except ValidationError as e:
+        _fail("ingest: " + "; ".join(err["msg"].removeprefix("Value error, ")
+                                    for err in e.errors()))
+    try:
+        built = ing.build(
             _tmdb(), show, year=year, tmdb_id=tmdb_id, refs=tuple(ref), subs_dir=subs,
             root=out, pick=_pick if sys.stdin.isatty() else None, refresh=refresh,
+            sources=sources, tvmaze=_tvmaze() if "tvmaze" in sources else None,
         )
-    except (IngestError, TmdbError) as e:
-        typer.echo(str(e), err=True)
-        raise typer.Exit(1) from None
+    except (ing.IngestError, TmdbError) as e:
+        _fail(str(e))
+    for w in built.warnings:
+        typer.echo(f"warning: {w}", err=True)
+    if built.existing is not None:
+        _finish_refresh(built, diff, yes)
+        return
+    bdir = ing.commit(built)
+    bundle = built.bundle
     typer.echo(f"Wrote {bdir / 'show.json'} ({len(bundle.episodes)} episodes, "
                f"{len(bundle.orderings)} orderings)")
+    _scan_line(built.scan)
+    typer.echo(render(quality_report(bundle, bdir), built.slug))
+
+
+def _scan_line(scan) -> None:
     if scan is not None:
         typer.echo(f"Subtitles: {len(scan.matched)} matched, {len(scan.missing)} episodes without, "
                    f"{len(scan.unmatched)} unmatched files, {len(scan.duplicates)} duplicates")
-    typer.echo(render(quality_report(bundle, bdir)))
+
+
+def _finish_refresh(built, diff_only: bool, yes: bool) -> None:
+    from showvenist.bundle import ingest as ing
+    from showvenist.bundle.diff import diff_bundles, load_history_impact, render_diff
+    from showvenist.bundle.overrides import override_warnings
+    from showvenist.bundle.quality import quality_report, render
+    from showvenist.bundle.store import bundle_path
+
+    d = diff_bundles(built.existing, built.bundle)
+    impact, note = load_history_impact(built.existing, built.bundle, built.slug)
+    typer.echo(render_diff(d, impact, note))
+    _scan_line(built.scan)
+    if diff_only:
+        typer.echo("--diff: nothing written.")
+        return
+    if not yes and not typer.confirm("Write the refreshed bundle?", default=False):
+        typer.echo("Nothing written.")
+        return
+    bdir = ing.commit(built)
+    typer.echo(f"Wrote {bdir / 'show.json'} (previous kept as show.json.prev)")
+    ov = bdir / "overrides.yaml"
+    if ov.exists():
+        for w in override_warnings(built.bundle, ov):
+            typer.echo(f"warning: {w}", err=True)
+    typer.echo(render(quality_report(built.bundle, bundle_path(built.slug, built.root)),
+                      built.slug))
+
+
+def _find_bundle(show: str, root: Path | None) -> str:
+    from showvenist.bundle.store import bundle_path, slugify
+
+    return show if (bundle_path(show, root) / "show.json").exists() else slugify(show)
 
 
 @bundle_app.command("check")
@@ -99,19 +184,63 @@ def bundle_check(
     show: str = typer.Argument(..., help="Bundle slug"),
     root: Path | None = typer.Option(None, "-o", help="Bundle root directory"),
 ) -> None:
-    """Print the bundle's data-quality report."""
+    """Print the bundle's data-quality report; conflicts are numbered for `bundle edit`."""
     from showvenist.bundle.overrides import BundleError
     from showvenist.bundle.quality import quality_report, render
-    from showvenist.bundle.store import bundle_path, load_bundle, slugify
+    from showvenist.bundle.store import bundle_path, load_bundle
 
-    if not (bundle_path(show, root) / "show.json").exists():
-        show = slugify(show)  # accept a title as well as a slug
+    show = _find_bundle(show, root)
     try:
         bundle = load_bundle(show, root)
     except BundleError as e:
         typer.echo(str(e), err=True)
         raise typer.Exit(1) from None
-    typer.echo(render(quality_report(bundle, bundle_path(show, root))))
+    typer.echo(render(quality_report(bundle, bundle_path(show, root)), show))
+
+
+@bundle_app.command("edit")
+def bundle_edit(
+    show: str = typer.Argument(..., help="Bundle slug"),
+    apply_fix: int | None = typer.Option(
+        None, "--apply-fix", metavar="N", help="Append conflict N's paste-ready fix (numbered "
+        "as `bundle check` lists them) before opening the editor"),
+    root: Path | None = typer.Option(None, "-o", help="Bundle root directory"),
+) -> None:
+    """Open overrides.yaml in $EDITOR (VISUAL, then vi); validate it on save."""
+    from showvenist.bundle.edit import FixError, edit_overrides
+    from showvenist.bundle.overrides import BundleError
+    from showvenist.bundle.quality import numbered_conflicts
+    from showvenist.bundle.store import bundle_path, load_bundle
+
+    show = _find_bundle(show, root)
+    try:
+        bundle = load_bundle(show, root, apply_overrides=False)
+    except BundleError as e:
+        _fail(f"{e}\nRun: showvenist ingest {show!r}")
+    fix = None
+    if apply_fix is not None:
+        conflicts = numbered_conflicts(bundle)
+        if not 1 <= apply_fix <= len(conflicts):
+            _fail(f"--apply-fix {apply_fix}: the bundle has {len(conflicts)} conflicts "
+                  "(see `showvenist bundle check`)")
+        fix = conflicts[apply_fix - 1].get("fix")
+        if not fix:
+            _fail(f"conflict {apply_fix} ({conflicts[apply_fix - 1].get('kind')}) has no "
+                  "paste-ready fix; resolve it by hand in overrides.yaml")
+    try:
+        result = edit_overrides(
+            bundle, bundle_path(show, root), fix=fix, run_editor=_run_editor,
+            confirm=lambda m: typer.confirm(m, default=True),
+            echo=lambda m: typer.echo(m, err=True))
+    except FixError as e:
+        _fail(f"--apply-fix {apply_fix}: {e}\n{fix}")
+    except typer.Abort:
+        typer.echo("Aborted; overrides.yaml not changed.", err=True)
+        raise typer.Exit(1) from None
+    if result == "aborted":
+        typer.echo("Aborted; overrides.yaml not changed.", err=True)
+        raise typer.Exit(1)
+    typer.echo("overrides.yaml saved." if result == "saved" else "overrides.yaml unchanged.")
 
 
 @app.command("inspect")
@@ -705,6 +834,10 @@ def identify(
     else:
         slug, bundle = _resolve_bundle(show, root)
         source = "--show"
+    from showvenist.bundle.diff import staleness_notice
+
+    if (notice := staleness_notice(bundle, slug, cfg.ingest.stale_days)) is not None:
+        typer.echo(notice, err=True)
     marker = None
     if show_dir is not None:
         try:

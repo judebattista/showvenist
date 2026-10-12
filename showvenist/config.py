@@ -6,7 +6,7 @@ import os
 import tomllib
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class _Section(BaseModel):
@@ -93,6 +93,31 @@ class BlocksConfig(_Section):
     block_slack: int = 1  # positions a disc block may span beyond its file count (skipped titles)
 
 
+INGEST_SOURCES = ("tmdb", "tvmaze")
+
+
+class IngestConfig(_Section):
+    """[ingest]: which sources `ingest` fetches (TMDB is primary and required; §4.2, §6.5)."""
+
+    sources: list[str] = Field(default_factory=lambda: ["tmdb", "tvmaze"])
+    stale_days: int = 30  # identify's refresh notice (§6.8)
+
+    @field_validator("sources")
+    @classmethod
+    def _sources_ok(cls, v: list[str]) -> list[str]:
+        v = [s.strip().lower() for s in v if s.strip()]
+        if "wikipedia" in v:
+            raise ValueError("the wikipedia source is not built yet (decision 62)")
+        bad = [s for s in v if s not in INGEST_SOURCES]
+        if bad:
+            raise ValueError(
+                f"unknown ingest source {', '.join(map(repr, bad))} "
+                f"(known: {', '.join(INGEST_SOURCES)})")
+        if "tmdb" not in v:
+            raise ValueError("ingest sources must include 'tmdb' (the primary source)")
+        return list(dict.fromkeys(v))
+
+
 class Config(_Section):
     tmdb: TmdbConfig = Field(default_factory=TmdbConfig)
     opensubtitles: OpenSubtitlesConfig = Field(default_factory=OpenSubtitlesConfig)
@@ -103,6 +128,7 @@ class Config(_Section):
     weights: WeightsConfig = Field(default_factory=WeightsConfig)
     hierarchy: HierarchyConfig = Field(default_factory=HierarchyConfig)
     blocks: BlocksConfig = Field(default_factory=BlocksConfig)
+    ingest: IngestConfig = Field(default_factory=IngestConfig)
 
 
 def _xdg(var: str, default: str) -> Path:
@@ -143,11 +169,13 @@ def load_config(path: Path | None = None, env: dict[str, str] | None = None) -> 
             if val is None:
                 continue
             current = getattr(section, field)
-            if isinstance(current, bool):
+            if isinstance(current, list):
+                val = [v.strip() for v in val.split(",") if v.strip()]
+            elif isinstance(current, bool):
                 val = val.lower() in ("1", "true", "yes", "on")
             elif isinstance(current, int):
                 val = int(val)
             elif isinstance(current, float):
                 val = float(val)
             setattr(section, field, val)
-    return cfg
+    return Config.model_validate(cfg.model_dump())

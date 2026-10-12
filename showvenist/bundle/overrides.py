@@ -237,3 +237,20 @@ def _apply_episode(ep: Episode, fields: dict, nodes: dict, path: Path) -> Episod
         except ValidationError as e:
             raise BundleError(path, f"{ep.id}.{name}: {_verr(e)}", _line(vnode)) from e
     return ep.model_copy(update=update)
+
+
+def override_warnings(bundle: Bundle, path: Path, shown_as: Path | str | None = None) -> list[str]:
+    """Problems overrides.yaml at `path` has against `bundle`, as messages: overrides for
+    episodes that no longer exist (the warnings apply_overrides raises) and, if the file no
+    longer loads at all, that error. Used after a refresh and by `bundle edit`."""
+    out: list[str] = []
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            apply_overrides(bundle, path)
+        except BundleError as e:
+            out.append(f"overrides do not apply to this bundle: {e}")
+        out += [str(w.message) for w in caught if issubclass(w.category, UserWarning)]
+    if shown_as is not None:
+        out = [m.replace(str(path), str(shown_as)) for m in out]
+    return out

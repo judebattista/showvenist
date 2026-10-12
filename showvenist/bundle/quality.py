@@ -146,7 +146,35 @@ def _prediction(q: SeasonQuality, name: str) -> str | None:
     return msg + " Consider " + " or ".join(hints) + "."
 
 
-def render(report: QualityReport) -> str:
+def numbered_conflicts(bundle: Bundle) -> list[dict[str, str]]:
+    """Merge conflicts in the order `bundle check` numbers them (1-based position + 1)."""
+    return [p.conflict for p in bundle.provenance if p.conflict]
+
+
+def _conflict_lines(conflicts: list[dict[str, str]], show: str) -> list[str]:
+    lines = [f"Unresolved conflicts ({len(conflicts)}):"]
+    groups: dict[str, list[tuple[int, dict[str, str]]]] = {}
+    for n, c in enumerate(conflicts, 1):
+        groups.setdefault(c.get("season", ""), []).append((n, c))
+
+    def order(k: str) -> tuple[int, int]:
+        return (0, int(k)) if k.lstrip("-").isdigit() else (1, 0)
+
+    for season in sorted(groups, key=order):
+        is_num = season.lstrip("-").isdigit()
+        lines.append(f"  {season_label(int(season)) if is_num else season or 'Whole show'}:")
+        for n, c in groups[season]:
+            if "kind" not in c:
+                lines.append(f"    [{n}] " + "; ".join(f"{k}={v}" for k, v in c.items()))
+                continue
+            lines.append(f"    [{n}] {c['kind']}: {c.get('detail') or c.get('primary', '')}")
+            if c.get("fix"):
+                lines.append(f"        paste-ready fix: showvenist bundle edit {show} "
+                             f"--apply-fix {n}")
+    return lines
+
+
+def render(report: QualityReport, show: str = "SHOW") -> str:
     lines = ["Bundle data quality"]
 
     def row(label: str, q: SeasonQuality) -> str:
@@ -171,8 +199,7 @@ def render(report: QualityReport) -> str:
     if report.excluded:
         lines.append("Excluded episodes: " + ", ".join(report.excluded))
     if report.conflicts:
-        lines.append(f"Unresolved conflicts ({len(report.conflicts)}):")
-        lines += ["  " + "; ".join(f"{k}={v}" for k, v in c.items()) for c in report.conflicts]
+        lines += _conflict_lines(report.conflicts, show)
     preds = [
         p
         for s in report.seasons
