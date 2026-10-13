@@ -118,6 +118,7 @@ def test_confirmed_moves_query():
     _move(h, db, "1:c", "/d/a_t02.mkv", 3, run=run, status="planned")
     _move(h, db, "1:d", "/d/a_t03.mkv", 4, run=run, kind="sidecar")
     _move(h, db, "1:e", "/d/a_t04.mkv", 0, run=run, kind="extra", extra=True)
+    _move(h, db, "1:i", "/d/a_t08.mkv", 7, run=run, kind="duplicate")  # a copy: no position
     _move(h, db, "1:f", "/d/a_t05.mkv", 6, run=run, show="other")
     _move(h, db, "1:g", "/d/a_t06.mkv", 7, run=run)
     # a match that is no longer confirmed (re-assigned) drops out
@@ -311,3 +312,20 @@ def test_session_history_discordance_turns_it_off(tmp_path):
     assert not sol.title_order.use
     assert sol.title_order.against == "Season 2/Disc 1 (history)"
     assert _pick(sess, sol, "a_t01.mkv") == "e3"
+
+
+def test_majority_of_groups_keeps_it_on():
+    ok = [(0, 0), (1, 1)]
+    bad = [(0, 1), (1, 0)]
+    g = {f"D{i}": ok for i in range(5)} | {"Pilot disc": bad, "Disc 4": bad}
+    v = judge(g)
+    assert v.use and (v.agree, v.disagree, v.against) == (5, 2, "Pilot disc")
+    assert v.line() == ("title order used as a tie-breaker; 5 of 7 discs agree "
+                        "(Pilot disc does not)")
+
+
+def test_two_thirds_is_the_threshold():
+    ok, bad = [(0, 0), (1, 1)], [(0, 1), (1, 0)]
+    assert judge({"A": ok, "B": ok, "C": bad}).use  # 2 of 3
+    assert not judge({"A": ok, "B": bad}).use  # 1 of 2
+    assert not judge({"A": ok, "B": bad, "C": bad}).use  # 1 of 3

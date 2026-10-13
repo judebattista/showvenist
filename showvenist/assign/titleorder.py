@@ -30,16 +30,20 @@ Item = tuple[int, Any]  # (title index, episode order key: anything totally orde
 class TitleOrderVerdict:
     use: bool
     agree: int = 0  # groups with at least one pair, every pair concordant
-    against: str | None = None  # the first group holding a discordant pair (use is False)
+    against: str | None = None  # the first group holding a discordant pair
     reverse: bool = False  # that group's pairs are ALL discordant (it runs in reverse)
+    disagree: int = 0  # groups holding a discordant pair
 
     def line(self) -> str:
         """The evidence-pane line (§11.5 item 4)."""
         if not self.use:
             how = "runs in reverse" if self.reverse else "is out of title order"
             return f"title order not used; {self.against} {how}"
-        if self.agree == 0:
+        if self.agree == 0 and not self.disagree:
             return "title order used as a tie-breaker; no evidence yet"
+        if self.disagree:
+            return (f"title order used as a tie-breaker; {self.agree} of "
+                    f"{self.agree + self.disagree} discs agree ({self.against} does not)")
         discs = "1 disc agrees" if self.agree == 1 else f"{self.agree} discs agree"
         return f"title order used as a tie-breaker; {discs}"
 
@@ -58,16 +62,27 @@ def _pairs(items: Sequence[Item]) -> tuple[int, int]:
     return con, dis
 
 
+MAJORITY = 2 / 3  # share of groups with pairs that must be fully concordant (decision 65)
+
+
 def judge(groups: Mapping[str, Iterable[Item]]) -> TitleOrderVerdict:
-    """The strict verdict over `groups` (label -> items), in the mapping's order."""
-    agree = 0
+    """The verdict over `groups` (label -> items), in the mapping's order: on when at least
+    MAJORITY of the groups that hold any pair are fully concordant (a group with one discordant
+    pair is discordant), and when there are no pairs at all."""
+    agree = disagree = 0
+    against: str | None = None
+    reverse = False
     for label, items in groups.items():
         con, dis = _pairs(list(items))
         if dis:
-            return TitleOrderVerdict(False, agree, label, reverse=con == 0)
-        if con:
+            disagree += 1
+            if against is None:
+                against, reverse = label, con == 0
+        elif con:
             agree += 1
-    return TitleOrderVerdict(True, agree)
+    total = agree + disagree
+    use = total == 0 or agree / total >= MAJORITY
+    return TitleOrderVerdict(use, agree, against, reverse, disagree)
 
 
 def _folder_label(folder: Path) -> str:

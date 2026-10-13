@@ -343,15 +343,16 @@ class History:
     def confirmed_moves(self, show_slug: str) -> list[tuple[str, int, int]]:
         """(old_path, season, episode) of every applied, not undone video move whose match is
         still a confirmed episode of the show, in journal order (title-order evidence, §11.5).
-        Sidecars, extras, planned and undone moves are left out. A two-episode file counts at
-        its first episode (it is one title on the disc)."""
+        Sidecars, extras, duplicate copies (a second title for an episode already placed), planned
+        and undone moves are left out. A two-episode file counts at its first episode (it is one
+        title on the disc)."""
         with self.db.transaction() as c:
             rows = c.execute(
                 "select r.old_path, m.season, m.episode from rename_op r"
                 " join match m on m.id = r.match_id"
                 " where m.show_slug=? and m.status='confirmed' and m.episode_id is not null"
                 " and m.season is not null and m.episode is not null"
-                " and r.kind <> 'sidecar' and r.status='done' and r.undone_at is null"
+                " and r.kind = 'episode' and r.status='done' and r.undone_at is null"
                 " order by r.id", (show_slug,)).fetchall()
         return [(r[0], int(r[1]), int(r[2])) for r in rows]
 
