@@ -199,6 +199,7 @@ class TmdbAdapter:
             CastEntry(
                 actor=c["name"],
                 character=((c.get("roles") or [{}])[0].get("character") or ""),
+                episodes=c.get("total_episode_count"),
             )
             for c in credits.get("cast", []) or []
             if c.get("name")

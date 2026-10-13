@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from showvenist.bundle.schema import Bundle, CastEntry
-from showvenist.scoring.names import cast_names
+from showvenist.scoring.names import cast_names, main_cast, series_cast_tokens
 from showvenist.scoring.text import Bm25, bm25_llr, chance_max, content_tokens, name_tokens, tokens
 from tests.synth import make_bundle
 
@@ -66,3 +66,23 @@ def test_chance_max_and_no_credit_for_flat_scores():
     assert abs(chance_max(6) - 1.8930) < 1e-3
     bm = Bm25([["alpha", "beta"], ["gamma"], ["delta"], ["alpha"]])
     assert not bm25_llr(bm, ["nothing"]).any()
+
+
+def test_main_cast_needs_enough_episodes():
+    b = make_bundle(20)  # 15% of 20 = 3 episodes
+    b.series_cast = [
+        CastEntry(actor="Reg Ular", character="Rex", episodes=18),
+        CastEntry(actor="Bit Part", character="Zorblax", episodes=2),
+        CastEntry(actor="Edge Case", character="Quenta", episodes=3),
+        CastEntry(actor="Old Bundle", character="Vera"),  # no count: kept
+    ]
+    assert [c.actor for c in main_cast(b)] == ["Reg Ular", "Edge Case", "Old Bundle"]
+    toks = series_cast_tokens(b)
+    assert "rex" in toks and "vera" in toks and "zorblax" not in toks
+
+
+def test_main_cast_share_grows_with_the_season_count():
+    b = make_bundle(100)  # 15% of 100 = 15 episodes
+    b.series_cast = [CastEntry(actor="A B", character="C", episodes=14),
+                     CastEntry(actor="D E", character="F", episodes=15)]
+    assert [c.actor for c in main_cast(b)] == ["D E"]

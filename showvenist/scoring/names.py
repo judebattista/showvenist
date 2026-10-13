@@ -11,14 +11,31 @@ Directors and writers are not stripped (the spike did not).
 
 from __future__ import annotations
 
-from showvenist.bundle.schema import Bundle
+import math
+
+from showvenist.bundle.schema import Bundle, CastEntry
 from showvenist.scoring.text import is_dictionary_word, name_tokens
+
+MAIN_CAST_SHARE = 0.15  # a main-cast member is credited in at least this share of the episodes
+MAIN_CAST_MIN_EPISODES = 3  # ... and never fewer than this many
+
+
+def main_cast(bundle: Bundle) -> list[CastEntry]:
+    """The series cast credited often enough to be main cast.
+
+    TMDB's aggregate credits list everyone, guest stars included, so a person counts as main
+    cast only with `episodes` >= max(3, 15% of the bundle's episodes). Entries with no count
+    (bundles written before it was stored) are kept, as before.
+    """
+    n = sum(1 for e in bundle.episodes if not e.excluded)
+    need = max(MAIN_CAST_MIN_EPISODES, math.ceil(MAIN_CAST_SHARE * n))
+    return [c for c in bundle.series_cast if c.episodes is None or c.episodes >= need]
 
 
 def series_cast_tokens(bundle: Bundle) -> set[str]:
     """Every token of the series (main) cast actor and character names."""
     out: set[str] = set()
-    for c in bundle.series_cast:
+    for c in main_cast(bundle):
         out.update(name_tokens(c.actor))
         out.update(name_tokens(c.character))
     return out

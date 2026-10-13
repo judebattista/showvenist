@@ -191,4 +191,6 @@ def test_series_cast_from_aggregate_credits():
     assert len(pb.series_cast) == 15
     first = pb.series_cast[0]
     assert (first.actor, first.character) == ("Nathan Fillion", "Mal Reynolds")
+    assert first.episodes == 14
+    assert pb.series_cast[1].episodes is None
     assert any(r.url.path.endswith("/tv/1437/aggregate_credits") for r in reqs)

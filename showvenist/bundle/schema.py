@@ -75,6 +75,9 @@ class Synopsis(_Model):
 class CastEntry(_Model):
     actor: str
     character: str = ""
+    # Series cast only: how many episodes the person is credited in (TMDB total_episode_count);
+    # None = unknown (bundles written before this field), treated as main cast.
+    episodes: int | None = None
 
 
 class SubtitleRef(_Model):
