@@ -674,6 +674,7 @@ Notes:
 - **Title card** exists only for shows that describe one in `overrides.yaml`. It reads video, not dialogue, so it shares no evidence with the dialogue scorers or the LLM and is summed in both regimes. On Samurai Jack the card was read in 9 of 10 episode files (the tenth is a half of a split two-parter, which has none), and for the other shows it adds nothing and costs nothing.
 - **Duration** mostly *rejects* extras and play-all titles. Within a season of identical runtimes it can't tell episodes apart, and its positive clamp reflects that.
 - **IDF weighting** (computed across the candidate set) automatically discounts what's common to every episode: main-cast names, subtitled theme songs, catchphrases.
+- **Main cast** (`series_cast` in the bundle) is TMDB's aggregate credits with each person's `episodes` count (`total_episode_count`). The synopsis, cues and guest scorers treat a person as main cast, and ignore their names, only when credited in at least max(3, 15% of the episodes); one-off guests in the aggregate list stay evidence (decision 66). A bundle written before the count existed keeps every entry as main cast until it is refreshed.
 - **Guest characters** are kept separate from the synopsis scorer because TMDB's character lists are structured and far more reliable than words picked out of a synopsis. Synopses name guest characters too, so the synopsis and cues scorers ignore all cast and character names; otherwise one name heard in the dialogue would count two or three times.
 
 ---

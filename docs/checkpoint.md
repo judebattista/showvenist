@@ -1,21 +1,25 @@
-# showvenist: session checkpoint (2026-10-11)
+# showvenist: session checkpoint (2026-10-13)
 
-Written so a fresh context can resume. The spec (`docs/spec.md`, decision log §19, decisions 38–60) stays the
+Written so a fresh context can resume. The spec (`docs/spec.md`, decision log §19, decisions 38–66) stays the
 source of truth; Beads (`bd ready`, `bd list`) holds the tasks; this file is the narrative state and the
 operating notes. Read `CLAUDE.md`, then this, then `bd ready`.
 
 ## 1. Where the code is
 
-- Branch **`m7-adapters`** (head: see `git log`; branched from `main` at the M6 checkpoint `e14ed0a`). **Nothing is
-  merged to `main` until the user does it.** **Nothing has been pushed; the user pushes.** Subagents never commit.
-- 1057 tests pass; `ruff check .` clean. Python is **`.venv/bin/python`**, `.venv/bin/showvenist`, `.venv/bin/ruff`
+- Branch **`main`** (head: see `git log`; M0–M7, the title-order work and the cast fix are all merged locally).
+  **Nothing has been pushed unless the user says so; the user pushes.** Subagents never commit. Topic branches
+  (`m7-adapters`, `title-order`, `title-order-majority`, `series-cast-main`) are merged and can be deleted.
+- 1115 tests pass; `ruff check .` clean. Python is **`.venv/bin/python`**, `.venv/bin/showvenist`, `.venv/bin/ruff`
   (`uv` is no longer on the PATH; do not install anything).
-- Milestones: **M0–M7 done** and reviewed (one Opus conformance review each, findings fixed; the user ran the
-  TUI over SSH on a synthetic season: `scripts/demo_season.py DIR` builds one, and `DIR/run.sh` runs showvenist
-  with state kept in DIR). M7 (decision 62): TVmaze secondary source merged at ingest (`adapters/tvmaze.py`, `bundle/merge.py`: alignment,
-  conflicts in `provenance[].conflict`, split detection with paste-ready overrides fix), `ingest --refresh [--diff]`
-  by slug/stored id with diff + history impact and `show.json.prev`, `bundle edit [--apply-fix N]`, staleness
-  notice. Wikipedia deliberately skipped (`sv-opu.2`; revisit only on measured gain). Decisions 56–62.
+- Milestones: **M0–M7 done** and reviewed. M7 (decision 62): TVmaze secondary source merged at ingest
+  (`adapters/tvmaze.py`, `bundle/merge.py`: alignment, conflicts in `provenance[].conflict`, split detection with
+  paste-ready overrides fix), `ingest --refresh [--diff]` by slug/stored id with diff + history impact and
+  `show.json.prev`, `bundle edit [--apply-fix N]`, staleness notice. `--refresh` aborts when the old bundle had
+  `ids.tvmaze` and TVmaze fails (`--source tmdb` drops it on purpose). Wikipedia skipped (`sv-opu.2`).
+- **Since M7 (decisions 63–66), all driven by real media (Burn Notice S01/S02 copies, then all 13 bundles):**
+  title-order tie-breaker with a majority-rule verdict (63, 65), two-episode files `S01E11+S01E12` (64, schema
+  v3 `episode_end`; schema now **v4**, `rename_op.created_dir`), parser knows extras folders, confirmed extras
+  move, copies of a confirmed episode become `_dupe_N`, and **series cast is main cast only (66)**.
 - Beads data is local (Dolt DB is gitignored); backup lives in `data/beads-backup/` (`bd backup sync`).
 
 ## 2. What exists (package `showvenist/`)
@@ -23,11 +27,11 @@ operating notes. Read `CLAUDE.md`, then this, then `bd ready`.
 bundle (schema, store, overrides incl. `new_episodes`, inherited orderings and `title_card`, quality, ingest) ·
 adapters (tmdb, localsubs, opensubtitles [mocked only, parked], llm_cues) · analysis (probe, tracks, subtitles,
 ocr, windows, pipeline, duplicates, inspect, cache, **cardframes**) · scoring (duration, title, **titlecard**,
-refsubs, synopsis, characters, cues, llm, candidates) · fusion · assign (basic, confidence, blocks, ordering) ·
+refsubs, synopsis, characters, cues, llm, candidates) · fusion · assign (basic, confidence, blocks, ordering, **titleorder**) ·
 hierarchy (parse, marker, readiness) · session · report (+ **edgeflags**: advisory `play_all`,
 `possible_two_parter`) · eval (harness, manifest, runner, fit, render, labelsheet, mkmanifest) · cli (`ingest`,
 `bundle check`, `inspect [--card]`, `identify [--plan|--apply]`, `eval [--from-history]`, `assign`, `history`,
-`forget`, `undo`) · **state** (migrations: schema v2, db with read-only open, history) · **rename** (types, naming,
+`forget`, `undo`) · **state** (migrations: schema v4, db with read-only open, history) · **rename** (types, naming,
 plan, sidecars, movelog: journaled apply and crash recovery, undo, token, render). TUI (`tui/`). TVmaze + merge (M7).
 
 **M5 (decisions 56–60).** Duplicates are never moved or deleted: the primary is renamed, other copies are renamed
@@ -59,7 +63,28 @@ and labeled files are listed in episode order). Eval now sorts and shuffles each
 seed. Coverage and errors at high were never affected (ties only reach low confidence); **top-1 numbers quoted
 in earlier checkpoints were inflated**, most for LLM-off runs.
 
-- **LLM off, 538 files (409 hand-named + labeled raw rips), shuffled:** top-1 **50.2%**, coverage at high 8.0%,
+- **Latest (2026-10-13, `PYTHONHASHSEED=0`, LLM off, 538 files, all bundles refreshed with TVmaze and the
+  main-cast filter):** top-1 **76.4%**, coverage at high **24.9%**, errors at high **0/132 (≤2.2%)**, unmatched
+  precision 90.0% / recall 83.7%; reliability high 100%, medium 95.3%, low 56.2%. Steps (files in `data/`):
+  `eval-before-refresh.txt` 51.5% / 8.0% (Burn Notice already on TVmaze) → `eval-after-refresh.txt` 58.6% / 8.2%
+  (TVmaze for the other 12 shows) → `eval-after-castfix.txt` 76.4% / 24.9% (decision 66). Per show top-1: West
+  Wing 88.9, Hulk 85.4, Firefly 92.9, Samurai Jack 83.3, Babylon 5 78.4, Supernatural 73.8, Wire 68.8, Burn
+  Notice 65.9, Expanse 60.0, Invisible Man 50.0, Farscape 18.2, White Shadow 0 (3 files). **Costs:** extras
+  recall fell 95.3% → 83.7% (Burn Notice 95% → 70%) and medium-confidence accuracy 100% → 95.3%; the Burn Notice
+  extras that flipped are not yet examined. The 15%/floor 3 threshold was a guess and has not been swept.
+- **Cause of the cast fix:** `series_cast` held TMDB's whole aggregate credits (526 people for Babylon 5, 2,167
+  for Supernatural), so guest-name and synopsis evidence was thrown away for many guests, and a refresh that
+  swapped a few entries flipped results (Babylon 5 S03E18). Now only people with `episodes` ≥ max(3, 15% of the
+  episodes) count; old bundles without a count keep every entry until refreshed. Eval on Babylon 5 after the
+  TVmaze refresh alone showed the other effect of a refresh: S01 runtimes all 45 → 44, so low-confidence files
+  reshuffle (noise).
+- **Burn Notice real runs (copies in `/home/jude/realrun/`, `run.sh` isolates state/cache/config):** S01 (66
+  files, 12 episodes) and S02 (26 files, 16 episodes) with a ground-truth manifest each
+  (`data/manifest-burn-s01.csv`, `-s02.csv`). The tool never made a confident mistake. S01 plan/apply/undo on the
+  copy: 44 moves, 0 failed, undo restored 66 files. S02 through the real identify path with S01 history:
+  13/16 right (the three wrong are all on disc 4, which is not in title order). Combined redundant files are
+  called extras (accepted failure mode). TMDB runtimes for S02–S07 are placeholders.
+- **LLM off, 538 files (409 hand-named + labeled raw rips), shuffled (OLD, 2026-10-09):** top-1 **50.2%**, coverage at high 8.0%,
   errors at high 0/43 (≤6.7%), unmatched precision 82.0% / recall 95.3%. (Before the fix: 70.6%.)
 - **LLM on (cached answers, season scope), 401 hand-named files, blocks on:** top-1 ≈ 91% shuffled (94.8%
   unshuffled), coverage at high **71.8%** (288 files), **2 errors at high** (bound 2.2%; the gate bar is 1%),
@@ -86,7 +111,7 @@ in earlier checkpoints were inflated**, most for LLM-off runs.
   69 labeled near-length rows. The 12 labeled play-alls (`extra-multi`) are decided as extras 11 of 12 times, 0 taken
   for an episode at high. `play_all` (needs reference-subtitle window scores) does not fire in this library.
 
-## 4. Decisions in this stretch (spec §19, 38–60; read them there)
+## 4. Decisions (spec §19; 38–66, read them there)
 
 38 M0 outcome 3 · 39 `wordfreq` OCR word check · 40 LLM evidence = `logit(p)+log(n−1)` · 41 `episode?` labels ·
 42 duration scorer · 43 OpenSubtitles live use parked · 44 M3 gate passed with a documented deviation · 45 gate
@@ -96,7 +121,11 @@ params (slack 1, u=2, margin 4, threshold 15) · 49 `extra-multi` label · 50 tw
 inherited orderings · **54 title-card scorer (opt-in per show via `overrides.yaml`, closed-set match, for-only)** ·
 **55 a run of exactly four I in a Roman reading is read as three** · 56 duplicates renamed in place (`_dupe_N`) ·
 57 extras prefix and collision suffix · 58 CLI plan/apply before the TUI · 59 `state.db` records decided/executed only ·
-**60 `--budget` and `--confirm` replace `--yes`**. Also in the spec now: §16.1 file-order rule
+**60 `--budget` and `--confirm` replace `--yes`** · 61 M6 TUI first version · 62 M7 order (TVmaze, refresh,
+`bundle edit`) · **63 title-order tie-breaker** (0.3·min(d²,4) per displaced rank, only when evidence supports it;
+`[blocks] title_order_weight`, 0 disables) · **64 two-episode files** (`assign S01E11+S01E12`, named `s01e11-e12`) ·
+**65 title-order verdict is a majority rule** (≥ 2/3 of discs with pairs concordant; copies are not evidence) ·
+**66 series cast is main cast only** (stored episode counts; ≥ max(3, 15% of episodes)). Also in the spec now: §16.1 file-order rule
 (eval shuffles), §14 note on the advisory `play_all`/`possible_two_parter` flags.
 
 ## 5. Standing rules and operating notes
@@ -127,7 +156,8 @@ inherited orderings · **54 title-card scorer (opt-in per show via `overrides.ya
 
 ## 6. Data kept in `data/` (gitignored; recreate from the commands in §7)
 
-`bundles/<slug>/show.json` for 13 shows (babylon-5-1994, burn-notice-2007, cowboy-bebop-1998, farscape-1999,
+`bundles/<slug>/show.json` (each refreshed 2026-10-13, `show.json.prev` kept; a pre-cast-fix copy is in
+`/home/jude/realrun/bundles-before-castfix`) for 13 shows (babylon-5-1994, burn-notice-2007, cowboy-bebop-1998, farscape-1999,
 firefly-2002, samurai-jack-2001, supernatural-2005, the-expanse-2015, the-incredible-hulk-1977,
 the-invisible-man-2000, the-west-wing-1999, the-white-shadow-1978, the-wire-2002); Samurai Jack has an
 `overrides.yaml` (custom ordering `disk`; Birth of Evil = S03E11/E12, Scotsman Saves Jack = S04E06/E07; and the
@@ -137,7 +167,8 @@ labels). Sheets: `extras-sheet.csv` (1,314 unnamed rips), `extras-sheet-sample.c
 `extras-sheet-sample-labelled.csv` (the user's labels, 108; Babylon 5 S05 and two Samurai Jack rows corrected),
 `extras-sample-priority.csv`. Eval outputs: `eval-*.txt` (latest: `eval-rebase-off.txt`, `eval-sj-card2-*.txt`,
 `eval-weak-llm2.txt`), older `thr*`, `final-*`, `cmp-*`. Real-library facts for parser tests: `title-tags.tsv`,
-`library-tree.txt`. Beads backup: `beads-backup/`.
+`library-tree.txt`. Beads backup: `beads-backup/`. Also `manifest-burn-s01.csv`, `manifest-burn-s02.csv`, `eval-before-refresh.txt`,
+`eval-after-refresh.txt`, `eval-after-castfix.txt`, `logs/refresh-all-20261013.txt` (the refresh loop output).
 
 ## 7. Commands that reproduce the current state
 
@@ -148,6 +179,10 @@ labels). Sheets: `extras-sheet.csv` (1,314 unnamed rips), `extras-sheet-sample.c
   --sample data/extras-sheet-sample-labelled.csv --bundles data/bundles -o data/manifest-all.csv
 # free eval (LLM off), blocks on, files shuffled; add --compare-blocks, --show-errors, --fit, --ablate
 .venv/bin/showvenist eval data/manifest-all.csv -o data/bundles --library /mnt/storage/tv --show-errors
+# refresh a bundle (needs `export SHOWVENIST_TMDB_API_KEY=...`; keeps show.json.prev); --diff previews
+.venv/bin/showvenist ingest SLUG --refresh --yes -o data/bundles
+# reproducible eval: ties are shuffled with a seed derived from a string hash (sv-tz9), so pin it
+PYTHONHASHSEED=0 .venv/bin/showvenist eval data/manifest-all.csv -o data/bundles --library /mnt/storage/tv
 # cached-only LLM (free)
 SHOWVENIST_LLM_SCOPE=season .venv/bin/showvenist eval data/manifest-named.csv -o data/bundles \
   --library /mnt/storage/tv --llm auto
@@ -155,21 +190,30 @@ SHOWVENIST_LLM_SCOPE=season .venv/bin/showvenist eval data/manifest-named.csv -o
 
 ## 8. Next steps (in this order; the user decides)
 
-1. **M8** per `docs/spec.md` (the user decides). Parked: Wikipedia (`sv-opu.2`), OCR survival eval (`sv-opu.5`, no
-   reference subtitles), OpenSubtitles (decision 43). M7 leftovers: staleness notice lacks `-o ROOT`; indentless
-   YAML list + trailing comment in `--apply-fix`; Bebop shows 12 air_date conflicts (expected per spec).
-2. Known gaps: a newer run's move links to the older run's match row (a `superseded` status would fix it); no CLI
-   test applies two seasons in one invocation; byte-identical copies share a fingerprint; `report.render_tables`
-   may mishandle bracketed file names. First real `--apply` is done on a copy of a season, never on `/mnt/storage/tv`
-   during development. TUI: `L` (full season as candidates) is deferred.
-3. Open small items: `sv-60p.13` (cues gate: needs paid cue generation), `sv-60p.15` (near-duplicate top-1
-   rule), `sv-31q` (duration σ with no season), `sv-o2p.7` (performance), `sv-o2p.9` (loose files with discs).
-4. Optional: a paid eval with the LLM over the labeled raw rips (estimate first, ask for the budget); fill the 35
-   skipped Supernatural near-length rows with `episode?`; generalize title cards to other shows (config only);
-   make production tie-breaking independent of file order if the user wants it strictly.
+1. **Burn Notice extras recall** (95% → 70% after decision 66): list the extras that flipped to episodes and see
+   which signal moved them; sweep the main-cast share (10/15/20%) only if that points at the threshold.
+2. **Full-library `identify --plan` run** (plan only, LLM off, nothing applied; `/mnt/storage/tv` stays read-only),
+   then review the reports. First read the remaining refresh conflicts on Expanse, Hulk, Invisible Man and West
+   Wing, and decide on Samurai Jack's proposed split of S04E04 (TVmaze numbers its halves S03E11/E12: probably a
+   numbering mismatch, do not run `--apply-fix 3` blindly).
+3. Small: `sv-tz9` (eval tie shuffle depends on `PYTHONHASHSEED`), `sv-36h` (trailing `_S01` in a folder name).
+   Parked: Wikipedia (`sv-opu.2`), OCR survival eval (`sv-opu.5`, no reference subtitles; keeps epic `sv-opu`
+   open), OpenSubtitles (decision 43). Older: `sv-60p.13`, `sv-60p.15`, `sv-31q`, `sv-o2p.7`, `sv-o2p.9`.
+4. Known gaps: a newer run's move links to the older run's match; no CLI test applies two seasons in one
+   invocation; byte-identical copies share a fingerprint; near-duplicates of a confirmed file are not found (only
+   exact content-key copies); a file already named `s01e11-e12` is read as E11 alone without history; `assign` of
+   another file to a held second episode gives a note, not a refusal; the bundle diff's history impact compares
+   only the first episode's number; a v2 `state.db` upgrades only on the first writing command; runs applied
+   before schema v4 have no `created_dir` (undo removes no folders for them); the staleness notice lacks
+   `-o ROOT`; `--apply-fix` with an indentless YAML list and trailing comment; `report.render_tables` may
+   mishandle bracketed names; TUI `L` deferred. S02 disc 4 of Burn Notice (out of title order) is a known miss.
+5. Optional: a season with a dedicated extras disc (the one disc shape not yet seen); a paid eval with the LLM
+   (estimate first, ask for the budget); generalize title cards to other shows (config only).
 
 ## 9. Waiting on the user
 
+- Real-media runs need the user's shell for anything TMDB: my shell has no `SHOWVENIST_TMDB_API_KEY`, `run.sh`
+  isolates XDG config, and the variable must be `export`ed (the user runs `ingest` with `!`).
 - Farscape: `touch /mnt/storage/tv/Farscape/Peacekeeper_Wars/.showvenist-ignore` (the user does it); Roughnecks
   files are being moved to Movies.
 - The Wire S03E05/E06 swap inside one disc is left as a manual fix (the user's decision; revisit if the error
