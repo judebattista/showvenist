@@ -574,6 +574,7 @@ def _input_tree(paths: list[Path], hcfg, tag_of):
         out.problems += t.problems
         out.disagreements += t.disagreements
         out.ignored += t.ignored
+        out.unrecognized += t.unrecognized
         out.extras += t.extras
         for s in t.seasons:
             have = by_num.get(s.number)
@@ -680,6 +681,9 @@ def format_tree(tree, slug: str | None = None, show_name: str | None = None) -> 
                      "(left as they are)")
     for ig in tree.ignored:
         lines.append(f"Skipping {ig.name}: it has a .showvenist-ignore file")
+    for un in tree.unrecognized:
+        lines.append(f"Skipping {un.name}: not a season, disc or extras folder "
+                     "(not processed; rename it if it should be)")
     if tree.problems:
         lines.append("Problems:")
         lines += [f"  {p}" for p in tree.problems]

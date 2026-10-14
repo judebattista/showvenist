@@ -18,13 +18,14 @@ def make_show(tmp_path: Path, ignore: bool) -> Path:
     return show
 
 
-def test_unparseable_folder_is_a_problem_until_it_is_ignored(tmp_path):
+def test_unrecognized_folder_is_flagged_and_skipped_until_it_is_ignored(tmp_path):
     show = make_show(tmp_path, ignore=False)
     t = build_tree(show, config=HierarchyConfig(), tag_of=lambda p: None)
-    assert any("Peacekeeper_Wars" in p for p in t.problems)
+    assert not t.problems and [p.name for p in t.unrecognized] == ["Peacekeeper_Wars"]
+    assert [f.path.name for f in t.all_files()] == ["title_t00.mkv"]
     (show / "Peacekeeper_Wars" / IGNORE_FILE).write_text("")
     t = build_tree(show, config=HierarchyConfig(), tag_of=lambda p: None)
-    assert not t.problems
+    assert not t.problems and not t.unrecognized
     assert [p.name for p in t.ignored] == ["Peacekeeper_Wars"]
     assert [f.path.name for f in t.all_files()] == ["title_t00.mkv"]  # the miniseries is out
 

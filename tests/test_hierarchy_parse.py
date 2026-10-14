@@ -142,9 +142,10 @@ def test_build_tree_unparseable_show_level(tmp_path):
         tmp_path, [("Farscape/Peacekeeper_Wars/a.mkv", ""), ("Farscape/Season01/disc1/b.mkv", "")]
     )
     show = build_tree(tmp_path / "Farscape", config=HierarchyConfig(), tag_of=tags.get)
-    assert any("Peacekeeper_Wars" in p for p in show.problems)
-    assert [s.number for s in show.seasons] == [1, None]
-    assert show.seasons[1].loose[0].path.name == "a.mkv"
+    assert not show.problems
+    assert [p.name for p in show.unrecognized] == ["Peacekeeper_Wars"]
+    assert [s.number for s in show.seasons] == [1]
+    assert [f.path.name for f in show.all_files()] == ["b.mkv"]  # the unrecognized folder is out
 
 
 def test_duplicate_disc_numbers_reported(tmp_path):

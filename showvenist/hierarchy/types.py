@@ -135,6 +135,7 @@ class ShowNode:
     problems: list[str] = field(default_factory=list)  # levels that could not be parsed
     disagreements: list[str] = field(default_factory=list)  # folder vs title tag
     ignored: list[Path] = field(default_factory=list)  # folders skipped via .showvenist-ignore
+    unrecognized: list[Path] = field(default_factory=list)  # show-level, no season: skipped
     extras: list[FileNode] = field(default_factory=list)  # in show-level extras folders
 
     def all_files(self) -> list[FileNode]:

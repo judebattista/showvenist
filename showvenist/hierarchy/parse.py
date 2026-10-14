@@ -282,6 +282,7 @@ class _Builder:
         self.stat = stat
         self.problems: list[str] = []
         self.ignored: list[Path] = []
+        self.unrecognized: list[Path] = []
         self.disagreements: list[str] = []
         self._seen: set[tuple[str, str]] = set()
 
@@ -470,11 +471,8 @@ def build_tree(
                     s = SeasonNode(None, None)
                     seasons.append(s)
                 s.discs.append(b.disc_folder(sub, ref, None))
-            else:
-                b.problems.append(
-                    f"cannot parse folder {sub.name!r} in {root.name!r} as season or disc"
-                )
-                seasons.append(SeasonNode(None, sub, loose=b.all_files_under(sub)))
+            else:  # not a season, disc or extras folder: flag it and leave it alone
+                b.unrecognized.append(sub)
         flat = b.files_in(root)
         if flat:
             # flattened files: the season comes from the title tag
@@ -495,5 +493,6 @@ def build_tree(
     show.seasons = seasons
     show.problems = b.problems
     show.ignored = b.ignored
+    show.unrecognized = b.unrecognized
     show.disagreements = b.disagreements
     return show
