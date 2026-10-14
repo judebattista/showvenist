@@ -1646,6 +1646,7 @@ class Session:
                     medium=sum(r.confidence.level == "medium" for r in all_rows),
                     low=sum(r.confidence.level == "low" for r in all_rows),
                     extras=sum(r.decision.kind == "extra" for r in all_rows),
+                    not_found=rep.summary.not_found,
                 ),
                 "notices": notices,
             }

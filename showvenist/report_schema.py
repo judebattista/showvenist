@@ -110,6 +110,9 @@ class Summary(_M):
     medium: int
     low: int
     extras: int
+    # Episodes of the solved ordering that no file was assigned to (at any confidence): a
+    # failed rip, a missing disc, or a file the tool took for something else
+    not_found: list[str] = []
 
 
 class Report(_M):

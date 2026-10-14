@@ -158,7 +158,13 @@ def build_report(
             )
         )
     rows.sort(key=lambda r: (r.disc is None, r.disc or "", r.path))
+    held: set[str] = set()
+    for r in rows:
+        ep = r.decision.episode
+        if ep is not None:
+            held.update(x for x in (ep.episode_id, ep.episode_end_id) if x)
     summary = Summary(
+        not_found=[c.label for c in candidates if c.id not in held],
         files=len(rows),
         high=sum(r.confidence.level == "high" for r in rows),
         medium=sum(r.confidence.level == "medium" for r in rows),
@@ -210,6 +216,15 @@ def _top_signals(r: FileReport, n: int = 3) -> str:
     )
 
 
+def _compact_labels(labels: list[str]) -> str:
+    """['S05E06', 'S05E10', 'S06E01'] -> 'S05: E06, E10; S06: E01'."""
+    by_season: dict[str, list[str]] = {}
+    for lab in labels:
+        season, _, ep = lab.partition("E")
+        by_season.setdefault(season, []).append("E" + ep)
+    return "; ".join(f"{s}: {', '.join(eps)}" for s, eps in by_season.items())
+
+
 def render_tables(report: Report) -> str:
     """One rich table per season (extras in their own table), rows grouped by disc."""
     groups: dict[int | None, list[FileReport]] = {}
@@ -237,6 +252,8 @@ def render_tables(report: Report) -> str:
     console.print(
         f"{s.files} files: {s.high} high, {s.medium} medium, {s.low} low; {s.extras} extras"
     )
+    if s.not_found:
+        console.print(f"Not found ({len(s.not_found)}): {_compact_labels(s.not_found)}")
     for note in report.notices:
         console.print(note)
     return buf.getvalue()

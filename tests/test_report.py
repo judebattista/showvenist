@@ -46,7 +46,19 @@ def test_sorting_and_decisions():
     assert x.decision.kind == "extra" and x.decision.episode is None
     assert x.confidence.delta is None and x.confidence.odds == ">999:1"
     assert x.runner_up is None and all(s.runner_up is None for s in x.signals)
-    assert r.summary.model_dump() == {"files": 3, "high": 2, "medium": 1, "low": 0, "extras": 1}
+    n = len(make_ctx().candidates)
+    assert r.summary.model_dump() == {
+        "files": 3, "high": 2, "medium": 1, "low": 0, "extras": 1,
+        "not_found": [f"S01E{k:02d}" for k in range(3, n + 1)],  # E01 and E02 have files
+    }
+
+
+def test_not_found_line_in_the_tables():
+    text = render_tables(_build())
+    assert "Not found (" in text and "S01: E03, E04" in text
+    r = _build()
+    r.summary.not_found = []
+    assert "Not found" not in render_tables(r)
 
 
 def test_runner_up_and_signals():
