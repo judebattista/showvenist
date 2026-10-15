@@ -252,6 +252,15 @@ SHOWVENIST_LLM_SCOPE=season .venv/bin/showvenist eval data/manifest-named.csv -o
 
 ## 9. Waiting on the user
 
+- **Applying to the real library (2026-10-15):** the read-only rule on `/mnt/storage/tv` is lifted one show at a
+  time, by the user naming the show, and returns when all are done. Procedure: plan with the real state dir and the
+  warm cache (`XDG_CACHE_HOME=/home/jude/realrun/cache`, no `run.sh`), show the move list, get the user's go, apply
+  with `--confirm TOKEN`; then **repeat plan + apply on the same show until a plan has no moves** (pinned files
+  clear others: The Expanse took 3 passes, 20/4/1 moves; stop on any failure or new kind of change). Only high
+  confidence moves; lows stay. Done: The Expanse. Next: Samurai Jack (`--order disk`), Babylon 5, Farscape,
+  Supernatural, then Burn Notice. Paid LLM pass afterwards, total budget $29, estimate first (Season 9 pilot: $0.30
+  for 18 files, all 34 picks unchanged and all high).
+
 - Real-media runs need the user's shell for anything TMDB: my shell has no `SHOWVENIST_TMDB_API_KEY`, `run.sh`
   isolates XDG config, and the variable must be `export`ed (the user runs `ingest` with `!`).
 - Farscape: the user moved `Peacekeeper_Wars` out of the show; Farscape S01/S02 `disc5` are empty (not ripped).
