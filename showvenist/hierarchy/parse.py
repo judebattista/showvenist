@@ -365,12 +365,20 @@ class _Builder:
         return node
 
     def place_files(self, files: list[FileNode], season: SeasonNode, folder: Path | None) -> None:
-        """Files with no disc folder: by tag disc ('tag:<label>'), else loose."""
+        """Files with no disc folder: by tag disc ('tag:<label>'), else loose. A file whose tag
+        names the number of exactly one numbered disc FOLDER of the season joins that disc: an
+        applied run leaves renamed episodes in the season folder with their disc tag, and a
+        second 'Disc 1' group beside the folder would make the number ambiguous."""
         by_key: dict[tuple, DiscNode] = {}
+        folder_discs = [d for d in season.discs if d.folder is not None and d.number is not None]
         for f in files:
             t = f.tag_disc
             if t is None:
                 season.loose.append(f)
+                continue
+            same = [d for d in folder_discs if d.number == t.number and t.number is not None]
+            if len(same) == 1:
+                same[0].files.append(f)
                 continue
             label = " ".join(t.label.split())
             k = (t.number, t.season, label.casefold())

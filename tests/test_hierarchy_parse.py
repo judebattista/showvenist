@@ -205,3 +205,33 @@ def test_stat_is_injectable(tmp_path):
 
     build_tree(tmp_path / "S", config=HierarchyConfig(), tag_of=tags.get, stat=fake)
     assert calls
+
+
+def test_renamed_episodes_in_the_season_folder_rejoin_their_disc_folder(tmp_path):
+    # an applied run moves episodes out of disc folders but their MKV title tag still names the
+    # disc: they must not form a second "Disc 1" beside the folder (the next plan would refuse)
+    tag = "Supernatural Season 4 Disc {}"
+    files = [
+        ("Supernatural/Season04/disc1/Supernatural Season 4 Disc 1_t00.mkv", tag.format(1)),
+        ("Supernatural/Season04/disc2/Supernatural Season 4 Disc 2_t00.mkv", tag.format(2)),
+        ("Supernatural/Season04/supernatural_s04e02.mkv", tag.format(1)),
+        ("Supernatural/Season04/supernatural_s04e03.mkv", tag.format(2)),
+        ("Supernatural/Season04/supernatural_s04e09.mkv", tag.format(2)),
+    ]
+    tags = _mk(tmp_path, files)
+    show = build_tree(tmp_path / "Supernatural", config=HierarchyConfig(), tag_of=tags.get)
+    (s4,) = show.seasons
+    assert [d.key for d in s4.discs] == ["disc1", "disc2"] and not s4.loose
+    assert [len(d.files) for d in s4.discs] == [2, 3]
+    assert [d.number for d in s4.discs] == [1, 2] and not show.problems
+
+
+def test_tag_disc_with_no_matching_folder_still_forms_its_own_group(tmp_path):
+    files = [
+        ("Show/Season01/disc1/Show Season 1 Disc 1_t00.mkv", "Show Season 1 Disc 1"),
+        ("Show/Season01/show_s01e05.mkv", "Show Season 1 Disc 3"),
+    ]
+    tags = _mk(tmp_path, files)
+    show = build_tree(tmp_path / "Show", config=HierarchyConfig(), tag_of=tags.get)
+    (s1,) = show.seasons
+    assert [d.key for d in s1.discs] == ["disc1", "tag:Disc 3"]
