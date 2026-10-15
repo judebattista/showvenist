@@ -102,6 +102,13 @@ in earlier checkpoints were inflated**, most for LLM-off runs.
   (expected under the custom `disk` ordering). Incomplete seasons are not modeled beyond one skipped title per
   disc (slack 1, `u` = 2): two or more missing on a disc, or a whole missing disc, may pull weak files into empty
   slots. Not measured.
+- **Remaining refresh conflicts (read 2026-10-15; no bundle edits needed):** Expanse (a special's air date, 12 days)
+  and West Wing (S07E08 air date, 21 days) are date-only. Invisible Man S02: two air dates plus a numbering swap
+  (TVmaze has TMDB's E15 as E16); the library holds only `s02e01`, so no effect yet; revisit if E15–E17 are ripped
+  and come out wrong. Hulk S01: TVmaze lists "Death in the Family"; TMDB has no such title and its E03 is "Final
+  Round" dated 1978-03-10 (possibly the date of "Death in the Family"; unconfirmed). 12 TMDB episodes, 12 hand-named
+  files, nothing unmatched. Do not add it via `new_episodes` before the real Season 1 list is known (it would shift
+  later numbers); check the early regular episodes by eye if Hulk raw rips appear.
 - **Burn Notice real runs (copies in `/home/jude/realrun/`, `run.sh` isolates state/cache/config):** S01 (66
   files, 12 episodes) and S02 (26 files, 16 episodes) with a ground-truth manifest each
   (`data/manifest-burn-s01.csv`, `-s02.csv`). The tool never made a confident mistake. S01 plan/apply/undo on the
@@ -223,8 +230,8 @@ SHOWVENIST_LLM_SCOPE=season .venv/bin/showvenist eval data/manifest-named.csv -o
    next". A possible rule, not built: a file whose length fits an adjacent pair is an extra when both episodes
    are already held by confident single files. Sweep the cast share (10/15/20%) only if this does not settle it.
 2. **Review the library plan** before any apply: Farscape S03 disc 1 `t00` by eye; the ~25 Supernatural extras of
-   18–75 min with no signal; the remaining refresh conflicts (Expanse, Hulk, Invisible Man, West Wing) and Samurai
-   Jack's proposed S04E04 split (do not run `--apply-fix 3` blindly). Then decide on apply, on copies first.
+   18–75 min with no signal; Samurai Jack's proposed S04E04 split (do not run `--apply-fix 3` blindly). The Expanse, West Wing,
+   Invisible Man and Hulk refresh conflicts are read (see §3). Then decide on apply, on copies first.
    Optional: measure gap pressure on a season with known holes (Supernatural S05, Babylon 5 S02); a new M3-gate run.
 3. Small: `sv-tz9` (eval tie shuffle depends on `PYTHONHASHSEED`), `sv-36h` (trailing `_S01` in a folder name).
    Parked: Wikipedia (`sv-opu.2`), OCR survival eval (`sv-opu.5`, no reference subtitles; keeps epic `sv-opu`
