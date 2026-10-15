@@ -98,8 +98,11 @@ in earlier checkpoints were inflated**, most for LLM-off runs.
   those discs were never ripped) and S03 E04 (disc 1 has `t00`, `t02`–`t04`; `t00` is E03 or E04 at 1.0:1 with no
   signal separating the two halves of "Self-Inflicted Wounds", so check it by eye and `assign`); Babylon 5 S02
   E14/E20 (the `Season02/temp` folder was a failed-rip re-do; the user deletes such folders); Expanse S01 E10;
-  Burn Notice S02 E16 (the known disc-4 miss, not a missing rip) and S07 (empty folder); Samurai Jack S04 E04/E05
-  (expected under the custom `disk` ordering). Incomplete seasons are not modeled beyond one skipped title per
+  Burn Notice S02 E16 (the known disc-4 miss, not a missing rip) and S07 (empty folder). Samurai Jack's
+  first plan used `aired` by mistake (identify needs `--order disk`: the files carry no disc, so ordering detection
+  cannot switch); re-run with `--order disk` (`data/logs/library-plan/samurai-jack-disk.*`): nothing not found, S03
+  11/2/3 high/medium/low, S04 10/0/4 low; the lows are the Birth of Evil and Scotsman Saves Jack halves, whose
+  custom episodes carry identical synopses. Incomplete seasons are not modeled beyond one skipped title per
   disc (slack 1, `u` = 2): two or more missing on a disc, or a whole missing disc, may pull weak files into empty
   slots. Not measured.
 - **Remaining refresh conflicts (read 2026-10-15; no bundle edits needed):** Expanse (a special's air date, 12 days)
