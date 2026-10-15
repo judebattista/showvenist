@@ -1,15 +1,16 @@
-# showvenist: session checkpoint (2026-10-13)
+# showvenist: session checkpoint (2026-10-14)
 
-Written so a fresh context can resume. The spec (`docs/spec.md`, decision log §19, decisions 38–66) stays the
+Written so a fresh context can resume. The spec (`docs/spec.md`, decision log §19, decisions 38–68) stays the
 source of truth; Beads (`bd ready`, `bd list`) holds the tasks; this file is the narrative state and the
 operating notes. Read `CLAUDE.md`, then this, then `bd ready`.
 
 ## 1. Where the code is
 
-- Branch **`main`** (head: see `git log`; M0–M7, the title-order work and the cast fix are all merged locally).
-  **Nothing has been pushed unless the user says so; the user pushes.** Subagents never commit. Topic branches
-  (`m7-adapters`, `title-order`, `title-order-majority`, `series-cast-main`) are merged and can be deleted.
-- 1115 tests pass; `ruff check .` clean. Python is **`.venv/bin/python`**, `.venv/bin/showvenist`, `.venv/bin/ruff`
+- Branch **`main`** (head: see `git log`; everything through decision 68 is merged and pushed by the user).
+  **Never push; the user pushes.** Subagents never commit. Topic branches (`m7-adapters`, `title-order`,
+  `title-order-majority`, `series-cast-main`, `unrecognized-folders`, `not-found-report`) are merged and can be
+  deleted.
+- 1116 tests pass; `ruff check .` clean. Python is **`.venv/bin/python`**, `.venv/bin/showvenist`, `.venv/bin/ruff`
   (`uv` is no longer on the PATH; do not install anything).
 - Milestones: **M0–M7 done** and reviewed. M7 (decision 62): TVmaze secondary source merged at ingest
   (`adapters/tvmaze.py`, `bundle/merge.py`: alignment, conflicts in `provenance[].conflict`, split detection with
@@ -19,7 +20,8 @@ operating notes. Read `CLAUDE.md`, then this, then `bd ready`.
 - **Since M7 (decisions 63–66), all driven by real media (Burn Notice S01/S02 copies, then all 13 bundles):**
   title-order tie-breaker with a majority-rule verdict (63, 65), two-episode files `S01E11+S01E12` (64, schema
   v3 `episode_end`; schema now **v4**, `rename_op.created_dir`), parser knows extras folders, confirmed extras
-  move, copies of a confirmed episode become `_dupe_N`, and **series cast is main cast only (66)**.
+  move, copies of a confirmed episode become `_dupe_N`, **series cast is main cast only (66)**, a folder under the show that is not a season, disc or extras folder is
+  flagged and skipped (67), and each season's report lists the episodes **not found** (68).
 - Beads data is local (Dolt DB is gitignored); backup lives in `data/beads-backup/` (`bd backup sync`).
 
 ## 2. What exists (package `showvenist/`)
@@ -78,6 +80,28 @@ in earlier checkpoints were inflated**, most for LLM-off runs.
   episodes) count; old bundles without a count keep every entry until refreshed. Eval on Babylon 5 after the
   TVmaze refresh alone showed the other effect of a refresh: S01 runtimes all 45 → 44, so low-confidence files
   reshuffle (noise).
+- **Library-wide plan-only run (2026-10-13/14, `identify SHOW --plan`, LLM off, nothing applied):** reports in
+  `data/logs/library-plan/<slug>.txt` (+ `.err`, `json/<slug>.json`), driven by `run-all.sh`/`run-two.sh`/
+  `run-json.sh` through `/home/jude/realrun/run.sh`; `check.py SLUG` compares a plan with the labeled manifest and
+  `spot.py` lists the high decisions. Supernatural 758 files took 3,118 s cold; Babylon 5 938 s, Farscape 880 s,
+  Samurai Jack 852 s, Expanse 459 s. Counts (high/medium/low): Supernatural 369/154/183 (332 moves), Samurai Jack
+  62/11/5, Expanse 14/2/8, Babylon 5 53/28/28, Farscape 29/14/34; Burn Notice 214 files (S01 is not blind: 42
+  files `[confirmed]` from the copy-run history); Hulk, Invisible Man, West Wing, Wire and Firefly are already
+  hand-named. All 70 labeled files at high are right. **Spot check** of ~570 non-named, non-confirmed high
+  decisions: every episode decision has content evidence (≥ +2 from synopsis, guests or title) except 5 (2 are
+  exact copies of confirmed Burn Notice files; Supernatural S04E18 and two S13E12 files at +1 to +2); no episode is
+  claimed twice at high by non-duplicates. About 25 Supernatural extras of 18–75 min are called extras at high
+  with every signal 0.0 (worth a look), plus a few elsewhere (Burn S04 disc4 `C5_t06`, Expanse S03 disc3 `t08`,
+  Babylon 5 S05 disc5 `t00`).
+- **Gaps found by that run (episodes no file was assigned to):** Supernatural S05 E06/E10/E22 (failed rips; every
+  other Supernatural season is complete); Farscape S01 and S02 E18–E22 (their `disc5` folders are **empty**, so
+  those discs were never ripped) and S03 E04 (disc 1 has `t00`, `t02`–`t04`; `t00` is E03 or E04 at 1.0:1 with no
+  signal separating the two halves of "Self-Inflicted Wounds", so check it by eye and `assign`); Babylon 5 S02
+  E14/E20 (the `Season02/temp` folder was a failed-rip re-do; the user deletes such folders); Expanse S01 E10;
+  Burn Notice S02 E16 (the known disc-4 miss, not a missing rip) and S07 (empty folder); Samurai Jack S04 E04/E05
+  (expected under the custom `disk` ordering). Incomplete seasons are not modeled beyond one skipped title per
+  disc (slack 1, `u` = 2): two or more missing on a disc, or a whole missing disc, may pull weak files into empty
+  slots. Not measured.
 - **Burn Notice real runs (copies in `/home/jude/realrun/`, `run.sh` isolates state/cache/config):** S01 (66
   files, 12 episodes) and S02 (26 files, 16 episodes) with a ground-truth manifest each
   (`data/manifest-burn-s01.csv`, `-s02.csv`). The tool never made a confident mistake. S01 plan/apply/undo on the
@@ -111,7 +135,7 @@ in earlier checkpoints were inflated**, most for LLM-off runs.
   69 labeled near-length rows. The 12 labeled play-alls (`extra-multi`) are decided as extras 11 of 12 times, 0 taken
   for an episode at high. `play_all` (needs reference-subtitle window scores) does not fire in this library.
 
-## 4. Decisions (spec §19; 38–66, read them there)
+## 4. Decisions (spec §19; 38–68, read them there)
 
 38 M0 outcome 3 · 39 `wordfreq` OCR word check · 40 LLM evidence = `logit(p)+log(n−1)` · 41 `episode?` labels ·
 42 duration scorer · 43 OpenSubtitles live use parked · 44 M3 gate passed with a documented deviation · 45 gate
@@ -125,7 +149,9 @@ inherited orderings · **54 title-card scorer (opt-in per show via `overrides.ya
 `bundle edit`) · **63 title-order tie-breaker** (0.3·min(d²,4) per displaced rank, only when evidence supports it;
 `[blocks] title_order_weight`, 0 disables) · **64 two-episode files** (`assign S01E11+S01E12`, named `s01e11-e12`) ·
 **65 title-order verdict is a majority rule** (≥ 2/3 of discs with pairs concordant; copies are not evidence) ·
-**66 series cast is main cast only** (stored episode counts; ≥ max(3, 15% of episodes)). Also in the spec now: §16.1 file-order rule
+**66 series cast is main cast only** (stored episode counts; ≥ max(3, 15% of episodes)) ·
+**67 unrecognized show-level folders are flagged and skipped** (not a parse problem) · **68 the report lists
+episodes not found per season** (`Summary.not_found`, informational only). Also in the spec now: §16.1 file-order rule
 (eval shuffles), §14 note on the advisory `play_all`/`possible_two_parter` flags.
 
 ## 5. Standing rules and operating notes
@@ -168,7 +194,8 @@ labels). Sheets: `extras-sheet.csv` (1,314 unnamed rips), `extras-sheet-sample.c
 `extras-sample-priority.csv`. Eval outputs: `eval-*.txt` (latest: `eval-rebase-off.txt`, `eval-sj-card2-*.txt`,
 `eval-weak-llm2.txt`), older `thr*`, `final-*`, `cmp-*`. Real-library facts for parser tests: `title-tags.tsv`,
 `library-tree.txt`. Beads backup: `beads-backup/`. Also `manifest-burn-s01.csv`, `manifest-burn-s02.csv`, `eval-before-refresh.txt`,
-`eval-after-refresh.txt`, `eval-after-castfix.txt`, `logs/refresh-all-20261013.txt` (the refresh loop output).
+`eval-after-refresh.txt`, `eval-after-castfix.txt`, `logs/refresh-all-20261013.txt` (the refresh loop output), `logs/library-plan/` (the
+plan-only library run).
 
 ## 7. Commands that reproduce the current state
 
@@ -190,12 +217,15 @@ SHOWVENIST_LLM_SCOPE=season .venv/bin/showvenist eval data/manifest-named.csv -o
 
 ## 8. Next steps (in this order; the user decides)
 
-1. **Burn Notice extras recall** (95% → 70% after decision 66): list the extras that flipped to episodes and see
-   which signal moved them; sweep the main-cast share (10/15/20%) only if that points at the threshold.
-2. **Full-library `identify --plan` run** (plan only, LLM off, nothing applied; `/mnt/storage/tv` stays read-only),
-   then review the reports. First read the remaining refresh conflicts on Expanse, Hulk, Invisible Man and West
-   Wing, and decide on Samurai Jack's proposed split of S04E04 (TVmaze numbers its halves S03E11/E12: probably a
-   numbering mismatch, do not run `--apply-fix 3` blindly).
+1. **Burn Notice extras recall** (95% → 70% after decision 66). Cause found: 5 of 8 combined/play-all
+   (`extra-multi`) files are now decided as episodes (3 low, 2 medium, none high), because a combined file really
+   hears the guests of the episodes it holds and the duration scorer treats a double-length file as "episode +
+   next". A possible rule, not built: a file whose length fits an adjacent pair is an extra when both episodes
+   are already held by confident single files. Sweep the cast share (10/15/20%) only if this does not settle it.
+2. **Review the library plan** before any apply: Farscape S03 disc 1 `t00` by eye; the ~25 Supernatural extras of
+   18–75 min with no signal; the remaining refresh conflicts (Expanse, Hulk, Invisible Man, West Wing) and Samurai
+   Jack's proposed S04E04 split (do not run `--apply-fix 3` blindly). Then decide on apply, on copies first.
+   Optional: measure gap pressure on a season with known holes (Supernatural S05, Babylon 5 S02); a new M3-gate run.
 3. Small: `sv-tz9` (eval tie shuffle depends on `PYTHONHASHSEED`), `sv-36h` (trailing `_S01` in a folder name).
    Parked: Wikipedia (`sv-opu.2`), OCR survival eval (`sv-opu.5`, no reference subtitles; keeps epic `sv-opu`
    open), OpenSubtitles (decision 43). Older: `sv-60p.13`, `sv-60p.15`, `sv-31q`, `sv-o2p.7`, `sv-o2p.9`.
@@ -214,8 +244,8 @@ SHOWVENIST_LLM_SCOPE=season .venv/bin/showvenist eval data/manifest-named.csv -o
 
 - Real-media runs need the user's shell for anything TMDB: my shell has no `SHOWVENIST_TMDB_API_KEY`, `run.sh`
   isolates XDG config, and the variable must be `export`ed (the user runs `ingest` with `!`).
-- Farscape: `touch /mnt/storage/tv/Farscape/Peacekeeper_Wars/.showvenist-ignore` (the user does it); Roughnecks
-  files are being moved to Movies.
+- Farscape: the user moved `Peacekeeper_Wars` out of the show; Farscape S01/S02 `disc5` are empty (not ripped).
+  Babylon 5 `temp` folders are the user's to delete (decision 67 now skips any such folder with a flag).
 - The Wire S03E05/E06 swap inside one disc is left as a manual fix (the user's decision; revisit if the error
   turns out to be general).
 - The user pushes branches; ask before assuming the remote state.
