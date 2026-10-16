@@ -145,7 +145,7 @@ in earlier checkpoints were inflated**, most for LLM-off runs.
   69 labeled near-length rows. The 12 labeled play-alls (`extra-multi`) are decided as extras 11 of 12 times, 0 taken
   for an episode at high. `play_all` (needs reference-subtitle window scores) does not fire in this library.
 
-## 4. Decisions (spec §19; 38–68, read them there)
+## 4. Decisions (spec §19; 38–69, read them there)
 
 38 M0 outcome 3 · 39 `wordfreq` OCR word check · 40 LLM evidence = `logit(p)+log(n−1)` · 41 `episode?` labels ·
 42 duration scorer · 43 OpenSubtitles live use parked · 44 M3 gate passed with a documented deviation · 45 gate
@@ -257,9 +257,13 @@ SHOWVENIST_LLM_SCOPE=season .venv/bin/showvenist eval data/manifest-named.csv -o
   warm cache (`XDG_CACHE_HOME=/home/jude/realrun/cache`, no `run.sh`), show the move list, get the user's go, apply
   with `--confirm TOKEN`; then **repeat plan + apply on the same show until a plan has no moves** (pinned files
   clear others: The Expanse took 3 passes, 20/4/1 moves; stop on any failure or new kind of change). Only high
-  confidence moves; lows stay. Done: The Expanse. Next: Samurai Jack (`--order disk`), Babylon 5, Farscape,
-  Supernatural, then Burn Notice. Paid LLM pass afterwards, total budget $29, estimate first (Season 9 pilot: $0.30
-  for 18 files, all 34 picks unchanged and all high).
+  confidence moves; lows stay. **Done and converged (runs 1-11):** The Expanse (1-3: 20/4/1), Samurai Jack (4: 61,
+  `--order disk`), Babylon 5 (5: 31), Farscape (6: 29), Supernatural (7-9: 332/34/7), Burn Notice (10-11:
+  118/22; its S01/S02 moves all match the labels). Undo with `undo N`, newest run first. Hand-named shows are not
+  applied. Paid LLM pass next, total budget $29, estimate first (Season 9 pilot: $0.30 for 18 files, all 34 picks
+  unchanged and all high), then the same per-show procedure. The read-only rule returns once the last show is done.
+  Caveats: an empty plan is not convergence (decision 69 fixed the Supernatural refusal; require a "No moves" line);
+  `passes.sh`'s `_dupe_` stop check also matches already-renamed files in the tables, so read the Moves section.
 
 - Real-media runs need the user's shell for anything TMDB: my shell has no `SHOWVENIST_TMDB_API_KEY`, `run.sh`
   isolates XDG config, and the variable must be `export`ed (the user runs `ingest` with `!`).
