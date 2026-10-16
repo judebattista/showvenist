@@ -252,8 +252,8 @@ SHOWVENIST_LLM_SCOPE=season .venv/bin/showvenist eval data/manifest-named.csv -o
 
 ## 9. Waiting on the user
 
-- **Applying to the real library (2026-10-15):** the read-only rule on `/mnt/storage/tv` is lifted one show at a
-  time, by the user naming the show, and returns when all are done. Procedure: plan with the real state dir and the
+- **Applying to the real library (2026-10-15):** the read-only rule on `/mnt/storage/tv` was lifted one show at a
+  time, by the user naming the show, and has since been reinstated. Procedure: plan with the real state dir and the
   warm cache (`XDG_CACHE_HOME=/home/jude/realrun/cache`, no `run.sh`), show the move list, get the user's go, apply
   with `--confirm TOKEN`; then **repeat plan + apply on the same show until a plan has no moves** (pinned files
   clear others: The Expanse took 3 passes, 20/4/1 moves; stop on any failure or new kind of change). Only high
@@ -263,8 +263,8 @@ SHOWVENIST_LLM_SCOPE=season .venv/bin/showvenist eval data/manifest-named.csv -o
   Burn Notice (12-13), Jack (14), Expanse (15-16), Babylon 5 (17), Farscape (18), Supernatural (19-20). LLM spend
   on 2026-10-16 about $7.1 (actual cost was about half the estimate); total about $16.7 of $29. Burn Notice S01/S02:
   every LLM-on high agreed with the labels. Still open (medium/low): B5 6/3, Farscape 0/2, Supernatural 0/3, Burn
-  Notice 13/0, Jack 5/1, Expanse 4/5. Undo newest run first. Hand-named shows are not applied. The read-only rule
-  returns once the user says the last show is done.
+  Notice 13/0, Jack 5/1, Expanse 4/5. Undo newest run first. Hand-named shows are not applied. **The read-only rule on `/mnt/storage/tv` was
+  reinstated on 2026-10-16** (CLAUDE.md applies again; a new apply needs the user to lift it for a named show).
   Caveats: an empty plan is not convergence (decision 69 fixed the Supernatural refusal; require a "No moves" line);
   `passes.sh`'s `_dupe_` stop check also matches already-renamed files in the tables, so read the Moves section.
 
