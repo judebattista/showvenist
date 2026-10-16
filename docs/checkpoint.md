@@ -257,11 +257,14 @@ SHOWVENIST_LLM_SCOPE=season .venv/bin/showvenist eval data/manifest-named.csv -o
   warm cache (`XDG_CACHE_HOME=/home/jude/realrun/cache`, no `run.sh`), show the move list, get the user's go, apply
   with `--confirm TOKEN`; then **repeat plan + apply on the same show until a plan has no moves** (pinned files
   clear others: The Expanse took 3 passes, 20/4/1 moves; stop on any failure or new kind of change). Only high
-  confidence moves; lows stay. **Done and converged (runs 1-11):** The Expanse (1-3: 20/4/1), Samurai Jack (4: 61,
-  `--order disk`), Babylon 5 (5: 31), Farscape (6: 29), Supernatural (7-9: 332/34/7), Burn Notice (10-11:
-  118/22; its S01/S02 moves all match the labels). Undo with `undo N`, newest run first. Hand-named shows are not
-  applied. Paid LLM pass next, total budget $29, estimate first (Season 9 pilot: $0.30 for 18 files, all 34 picks
-  unchanged and all high), then the same per-show procedure. The read-only rule returns once the last show is done.
+  confidence moves; lows stay. **Done and converged (runs 1-20):** LLM-off round: The Expanse (1-3),
+  Samurai Jack (4), Babylon 5 (5), Farscape (6), Supernatural (7-9), Burn Notice (10-11). Paid LLM round
+  (`--llm auto`; answers cached, then planned and applied with `--budget 0` from the cache via `passes-llm.sh`):
+  Burn Notice (12-13), Jack (14), Expanse (15-16), Babylon 5 (17), Farscape (18), Supernatural (19-20). LLM spend
+  on 2026-10-16 about $7.1 (actual cost was about half the estimate); total about $16.7 of $29. Burn Notice S01/S02:
+  every LLM-on high agreed with the labels. Still open (medium/low): B5 6/3, Farscape 0/2, Supernatural 0/3, Burn
+  Notice 13/0, Jack 5/1, Expanse 4/5. Undo newest run first. Hand-named shows are not applied. The read-only rule
+  returns once the user says the last show is done.
   Caveats: an empty plan is not convergence (decision 69 fixed the Supernatural refusal; require a "No moves" line);
   `passes.sh`'s `_dupe_` stop check also matches already-renamed files in the tables, so read the Moves section.
 
